@@ -3,8 +3,6 @@ import { LLMProvider, ChatMessage } from "../providers/types.js";
 import { ToolRegistry } from "../tools/registry.js";
 import chalk from "chalk";
 
-
-
 function formatToolArgs(name: string, args: Record<string, unknown>): string {
   switch (name) {
     case "read_file":
@@ -34,6 +32,7 @@ function formatToolResult(name: string, output: string): string {
 export class LLMAgent extends BaseAgent {
   private provider: LLMProvider;
   private tools: ToolRegistry;
+  private history: ChatMessage[] = [];
 
   constructor(config: AgentConfig, model: string, provider: LLMProvider, tools: ToolRegistry) {
     super(config, model);
@@ -41,29 +40,70 @@ export class LLMAgent extends BaseAgent {
     this.tools = tools;
   }
 
+  /**
+   * Start a new conversation with a task. Initializes history with system prompt + task.
+   */
+  startTask(task: AgentTask): void {
+    this.history = this.buildMessages(task);
+  }
+
+  /**
+   * Continue the existing conversation by adding a new user message.
+   * Returns the agent's response (final text after all tool calls).
+   */
+  async continueChat(userMessage: string): Promise<{ output: string; tokenUsage: { prompt: number; completion: number } }> {
+    this.history.push({ role: "user", content: userMessage });
+    return this.runLoop();
+  }
+
+  /**
+   * Get the current conversation history (for passing to reviewer/coder).
+   */
+  getHistory(): ChatMessage[] {
+    return [...this.history];
+  }
+
+  /**
+   * Reset conversation history (for new subtask).
+   */
+  resetHistory(): void {
+    this.history = [];
+  }
+
+  /**
+   * One-shot execute (creates fresh history each time — for backward compat).
+   */
   async execute(task: AgentTask): Promise<AgentResult> {
     const startTime = Date.now();
-    const messages: ChatMessage[] = this.buildMessages(task);
+    this.history = this.buildMessages(task);
+    const { output, tokenUsage } = await this.runLoop();
+    return {
+      taskId: task.id,
+      agentRole: this.config.role,
+      output,
+      tokenUsage,
+      duration: Date.now() - startTime,
+    };
+  }
+
+  /**
+   * Core LLM loop: stream response, execute tool calls (in parallel), repeat.
+   * Operates on this.history — appends messages in place.
+   */
+  private async runLoop(): Promise<{ output: string; tokenUsage: { prompt: number; completion: number } }> {
     const toolDefs = this.tools.getDefinitions();
     const roleTag = chalk.cyan(`[${this.config.role}]`);
 
     let totalPrompt = 0;
     let totalCompletion = 0;
     let finalContent = "";
-    let rounds = 0;
-    let hasModifiedFiles = false;
-    let rePromptCount = 0;
-    const MAX_REPROMPTS = 5;
 
     while (true) {
-      rounds++;
-
       // ── Stream the LLM response ──────────────────────────────
       let content = "";
       let thinking = "";
       let toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[] | undefined;
       let evalCount = 0;
-      let evalDurationNs = 0;
       let thinkingActive = false;
       let contentActive = false;
       let tokenCount = 0;
@@ -71,17 +111,15 @@ export class LLMAgent extends BaseAgent {
 
       const stream = this.provider.chatStream({
         model: this.model,
-        messages,
+        messages: this.history,
         tools: toolDefs,
       });
 
       for await (const chunk of stream) {
-        // ── Capture tool calls from stream ──
         if (chunk.tool_calls) {
           toolCalls = chunk.tool_calls;
         }
 
-        // ── Thinking/reasoning tokens ──
         if (chunk.thinking) {
           tokenCount++;
           if (!thinkingActive) {
@@ -93,10 +131,8 @@ export class LLMAgent extends BaseAgent {
           process.stdout.write(chalk.dim(chunk.thinking));
         }
 
-        // ── Content tokens ──
         if (chunk.content) {
           tokenCount++;
-          // Transition from thinking to content
           if (thinkingActive) {
             thinkingActive = false;
             contentActive = true;
@@ -109,20 +145,16 @@ export class LLMAgent extends BaseAgent {
           process.stdout.write(chunk.content);
         }
 
-        // ── Final chunk ──
         if (chunk.done) {
           if (thinkingActive) thinkingActive = false;
           if (chunk.tokenCount) evalCount = chunk.tokenCount;
-          if (chunk.durationNs) evalDurationNs = chunk.durationNs;
         }
       }
 
-      // Close any open line
       if (thinkingActive || contentActive) {
         process.stdout.write("\n");
       }
 
-      // Show TPS summary for this round
       const streamDuration = Date.now() - streamStart;
       if (tokenCount > 0 && streamDuration > 0) {
         const tps = tokenCount / (streamDuration / 1000);
@@ -133,70 +165,55 @@ export class LLMAgent extends BaseAgent {
 
       totalCompletion += evalCount || tokenCount;
 
-      // ── Handle tool calls ─────────────────────────────────────
+      // ── No tool calls → done ─────────────────────────────────
       if (!toolCalls || toolCalls.length === 0) {
-        if (!hasModifiedFiles && rePromptCount < MAX_REPROMPTS) {
-          rePromptCount++;
-          messages.push({
-            role: "user",
-            content: "You have NOT created or modified any files yet. You MUST call write_file or edit_file RIGHT NOW to create the actual code. Do not describe what you plan to do — call write_file immediately with the complete code.",
-          });
-          continue;
-        }
         finalContent = content;
+        // Store assistant response in history
+        this.history.push({ role: "assistant", content });
         break;
       }
 
       // Add assistant message with tool calls to history
-      messages.push({
+      this.history.push({
         role: "assistant",
         content,
         tool_calls: toolCalls,
       });
 
-      // Execute each tool call
-      for (const toolCall of toolCalls) {
-        const argsStr = formatToolArgs(toolCall.name, toolCall.arguments);
-        console.log(`${roleTag} ${chalk.yellow("⚙")} ${chalk.bold(toolCall.name)}(${argsStr})`);
+      // ── Execute ALL tool calls in parallel ───────────────────
+      const results = await Promise.all(
+        toolCalls.map(async (toolCall) => {
+          const argsStr = formatToolArgs(toolCall.name, toolCall.arguments);
+          console.log(`${roleTag} ${chalk.yellow("⚙")} ${chalk.bold(toolCall.name)}(${argsStr})`);
 
-        // Track if actual work was done (not just reading)
-        if (toolCall.name === "write_file" || toolCall.name === "edit_file" || toolCall.name === "run_command") {
-          hasModifiedFiles = true;
-          rePromptCount = 0;
-        }
+          let output: string;
+          try {
+            output = await this.tools.execute(toolCall.name, toolCall.arguments);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            output = `Error: ${msg}`;
+          }
 
-        let output: string;
-        try {
-          output = await this.tools.execute(toolCall.name, toolCall.arguments);
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          output = `Error: ${msg}`;
-        }
+          const preview = formatToolResult(toolCall.name, output);
+          console.log(`${roleTag} ${chalk.green("→")} ${preview.split("\n").join("\n" + roleTag + "   ")}`);
 
-        const preview = formatToolResult(toolCall.name, output);
-        console.log(`${roleTag} ${chalk.green("→")} ${preview.split("\n").join("\n" + roleTag + "   ")}`);
+          return { id: toolCall.id, name: toolCall.name, output };
+        })
+      );
 
-        messages.push({
+      // Add all tool results to history
+      for (const result of results) {
+        this.history.push({
           role: "tool",
-          content: output,
-          tool_call_id: toolCall.id,
+          content: result.output,
+          tool_call_id: result.id,
         });
       }
     }
 
-
-
-    const duration = Date.now() - startTime;
-
     return {
-      taskId: task.id,
-      agentRole: this.config.role,
       output: finalContent,
-      tokenUsage: {
-        prompt: totalPrompt,
-        completion: totalCompletion,
-      },
-      duration,
+      tokenUsage: { prompt: totalPrompt, completion: totalCompletion },
     };
   }
 }

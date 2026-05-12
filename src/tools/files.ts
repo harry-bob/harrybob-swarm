@@ -3,7 +3,31 @@ import { dirname } from "node:path";
 import { Tool } from "./types.js";
 import { Sandbox } from "./sandbox.js";
 
-export function createReadFileTool(sandbox: Sandbox): Tool {
+/**
+ * Simple per-subtask cache for read_file results.
+ * Invalidated when files are written/edited.
+ */
+export class FileCache {
+  private cache = new Map<string, string>();
+
+  get(path: string): string | undefined {
+    return this.cache.get(path);
+  }
+
+  set(path: string, content: string): void {
+    this.cache.set(path, content);
+  }
+
+  invalidate(path: string): void {
+    this.cache.delete(path);
+  }
+
+  invalidateAll(): void {
+    this.cache.clear();
+  }
+}
+
+export function createReadFileTool(sandbox: Sandbox, cache?: FileCache): Tool {
   return {
     definition: {
       name: "read_file",
@@ -14,8 +38,22 @@ export function createReadFileTool(sandbox: Sandbox): Tool {
     },
     async execute(args) {
       const filePath = sandbox.validate(args.path as string);
+      const relPath = sandbox.relative(args.path as string);
+
+      // Check cache first
+      if (cache) {
+        const cached = cache.get(relPath);
+        if (cached !== undefined) {
+          return cached;
+        }
+      }
+
       try {
         const content = await readFile(filePath, "utf-8");
+        // Store in cache
+        if (cache) {
+          cache.set(relPath, content);
+        }
         return content;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -25,7 +63,7 @@ export function createReadFileTool(sandbox: Sandbox): Tool {
   };
 }
 
-export function createWriteFileTool(sandbox: Sandbox): Tool {
+export function createWriteFileTool(sandbox: Sandbox, cache?: FileCache): Tool {
   return {
     definition: {
       name: "write_file",
@@ -40,6 +78,10 @@ export function createWriteFileTool(sandbox: Sandbox): Tool {
       try {
         await mkdir(dirname(filePath), { recursive: true });
         await writeFile(filePath, args.content as string, "utf-8");
+        // Invalidate cache for this file
+        if (cache) {
+          cache.invalidate(sandbox.relative(args.path as string));
+        }
         return `File written: ${sandbox.relative(args.path as string)}`;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -49,7 +91,7 @@ export function createWriteFileTool(sandbox: Sandbox): Tool {
   };
 }
 
-export function createEditFileTool(sandbox: Sandbox): Tool {
+export function createEditFileTool(sandbox: Sandbox, cache?: FileCache): Tool {
   return {
     definition: {
       name: "edit_file",
@@ -71,6 +113,10 @@ export function createEditFileTool(sandbox: Sandbox): Tool {
         }
         content = content.replace(oldText, newText);
         await writeFile(filePath, content, "utf-8");
+        // Invalidate cache for this file
+        if (cache) {
+          cache.invalidate(sandbox.relative(args.path as string));
+        }
         return `File edited: ${sandbox.relative(args.path as string)}`;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -93,7 +139,6 @@ export function createListFilesTool(sandbox: Sandbox): Tool {
       const dirPath = sandbox.validate((args.path as string) || ".");
       try {
         const entries = await readdir(dirPath, { withFileTypes: true });
-        // Filter out sensitive files
         const filtered = entries.filter((e) => {
           const name = e.name;
           return !name.startsWith(".") || name === ".swarmrc.json";

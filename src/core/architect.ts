@@ -138,6 +138,23 @@ export class ArchitectAgent {
     };
   }
 
+  /**
+   * Quick re-planning pass — uses the existing tools to evaluate and adjust the plan.
+   */
+  async replan(prompt: string): Promise<string> {
+    const messages: ChatMessage[] = [
+      { role: "system", content: ARCHITECT_SYSTEM_PROMPT },
+      { role: "user", content: prompt },
+    ];
+
+    const response = await this.provider.chat({
+      model: this.model,
+      messages,
+    });
+
+    return response.content || "NO CHANGES";
+  }
+
   private parsePlan(content: string, fallback: string): TaskPlan {
     try {
       // Try to extract JSON from the response

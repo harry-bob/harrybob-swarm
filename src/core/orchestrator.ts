@@ -3,7 +3,7 @@ import { AgentResult } from "../agents/base.js";
 import { ArchitectAgent } from "./architect.js";
 import { TaskPlan, Subtask } from "./types.js";
 import { createProvider } from "../providers/factory.js";
-import { Sandbox, ToolRegistry, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool } from "../tools/index.js";
+import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool } from "../tools/index.js";
 import { saveSession } from "./session.js";
 import chalk from "chalk";
 
@@ -33,17 +33,17 @@ interface RunResult {
   plan?: TaskPlan;
 }
 
-// ── Tool registries (with sandbox) ──────────────────────────────
+// ── Tool registries (with sandbox + cache) ────────────────────
 
 function isToolDisabled(name: string, config: SwarmConfig): boolean {
   return (config.disabledTools || []).includes(name);
 }
 
-function createCoderTools(sandbox: Sandbox, config: SwarmConfig): ToolRegistry {
+function createCoderTools(sandbox: Sandbox, config: SwarmConfig, cache?: FileCache): ToolRegistry {
   const r = new ToolRegistry();
-  r.register(createReadFileTool(sandbox));
-  r.register(createWriteFileTool(sandbox));
-  r.register(createEditFileTool(sandbox));
+  r.register(createReadFileTool(sandbox, cache));
+  r.register(createWriteFileTool(sandbox, cache));
+  r.register(createEditFileTool(sandbox, cache));
   r.register(createListFilesTool(sandbox));
   r.register(createRunCommandTool(sandbox));
   if (!isToolDisabled("web_search", config)) r.register(createWebSearchTool());
@@ -69,7 +69,7 @@ function createArchitectTools(sandbox: Sandbox, provider: any, model: string, co
   return r;
 }
 
-// ── Tool instruction prompts ────────────────────────────────────
+// ── Tool instruction prompts ──────────────────────────────────
 
 const CODER_TOOLS_PROMPT = `
 
@@ -91,7 +91,34 @@ Inspect code and run tests. Do NOT write or edit files — provide feedback for 
 End your review with EXACTLY one line: [STATUS: APPROVED] — if code is good or [STATUS: NEEDS_WORK] — if it needs improvements.`;
 
 
-// ── UI helpers ──────────────────────────────────────────────────
+// ── Semaphore for concurrency control ─────────────────────────
+
+class Semaphore {
+  private waiting: (() => void)[] = [];
+  private count: number;
+
+  constructor(max: number) {
+    this.count = max;
+  }
+
+  async acquire(): Promise<void> {
+    if (this.count > 0) {
+      this.count--;
+      return;
+    }
+    return new Promise((resolve) => this.waiting.push(resolve));
+  }
+
+  release(): void {
+    if (this.waiting.length > 0) {
+      this.waiting.shift()!();
+    } else {
+      this.count++;
+    }
+  }
+}
+
+// ── UI helpers ────────────────────────────────────────────────
 
 const BOX = {
   tl: "╔", tr: "╗", bl: "╚", br: "╝",
@@ -120,16 +147,17 @@ function formatDuration(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
   if (ms < 60_000) return `${(ms / 1000).toFixed(1)}s`;
   const mins = Math.floor(ms / 60_000);
-  const secs = Math.round((ms % 60_000) / 1000);
+  const secs = Math.round((ms % 60_000) % 60);
   return `${mins}m ${secs}s`;
 }
 
-// ── Orchestrator ─────────────────────────────────────────────────
+// ── Orchestrator ──────────────────────────────────────────────
 
 export class Orchestrator {
   private config: SwarmConfig;
   private provider;
   private sandbox: Sandbox;
+  private maxReviewerRounds = 3;
 
   constructor(config: SwarmConfig) {
     this.config = config;
@@ -150,7 +178,7 @@ export class Orchestrator {
     console.log(chalk.cyan(boxBottom()));
     console.log();
 
-    // ── Phase 1: Planning (Leader) ───────────────────────────
+    // ── Phase 1: Planning (Architect) ────────────────────────
     console.log(chalk.magenta(`${"─".repeat(60)}`));
     console.log(chalk.magenta.bold("🧠 PHASE 1: PLANNING"));
     console.log(chalk.magenta(`${"─".repeat(60)}`));
@@ -159,23 +187,14 @@ export class Orchestrator {
     const architect = new ArchitectAgent(this.provider, this.config.model, architectTools);
     const plan = await architect.plan(taskDescription);
 
-    console.log(chalk.magenta(`\n  🎯 ${plan.goal}`));
-    console.log(chalk.magenta(`  📦 ${plan.subtasks.length} subtask(s)\n`));
+    this.printPlan(plan);
 
-    for (const st of plan.subtasks) {
-      const deps = st.dependencies.length > 0 ? chalk.gray(` → after ${st.dependencies.join(", ")}`) : "";
-      console.log(chalk.magenta(`  ┌─ ${chalk.bold(st.id)}: ${st.title}${deps}`));
-      const desc = st.description.length > 100 ? st.description.slice(0, 100) + "..." : st.description;
-      console.log(chalk.magenta(`  └─ ${chalk.dim(desc)}`));
-      console.log();
-    }
-
-    // ── Phase 2: Execute ──────────────────────────────────────
+    // ── Phase 2: Pipeline Execution ──────────────────────────
     console.log(chalk.blue(`${"─".repeat(60)}`));
     console.log(chalk.blue.bold("⚡ PHASE 2: EXECUTION"));
     console.log(chalk.blue(`${"─".repeat(60)}`));
 
-    const subtaskResults = await this.executeSubtasks(plan);
+    const subtaskResults = await this.executePipeline(taskDescription, plan, architect, architectTools);
 
     // ── Phase 3: Summary ──────────────────────────────────────
     const duration = Date.now() - startTime;
@@ -192,30 +211,9 @@ export class Orchestrator {
     const completedIds = Object.keys(subtaskResults);
     const failedIds = plan.subtasks.filter((s) => !completedIds.includes(s.id));
 
-    console.log();
-    console.log(chalk.green(boxTop()));
-    console.log(chalk.green(boxLine(chalk.bold("📋 SUMMARY"))));
-    console.log(chalk.green(boxSep()));
+    this.printSummary(plan, completedIds, failedIds, duration, totalTokens);
 
-    for (const st of plan.subtasks) {
-      const done = completedIds.includes(st.id);
-      const icon = done ? chalk.green("✅") : chalk.red("❌");
-      console.log(chalk.green(boxLine(`  ${icon} ${st.id}: ${st.title}`)));
-    }
-
-    console.log(chalk.green(boxSep()));
-    console.log(chalk.green(boxLine(`  ⏱  Duration: ${formatDuration(duration)}`)));
-    console.log(chalk.green(boxLine(`  🔧 Tokens: ${totalTokens.prompt + totalTokens.completion} total`)));
-    console.log(chalk.green(boxLine(`  🤖 Agents: ${[...new Set(allResults.map(r => r.agentRole.split(":")[0]))].join(", ")}`)));
-
-    if (failedIds.length > 0) {
-      console.log(chalk.green(boxLine(`  ${chalk.yellow("⚠")}  ${failedIds.length} subtask(s) skipped`)));
-    }
-
-    console.log(chalk.green(boxBottom()));
-    console.log();
-
-    // ── Save session for follow-up context ──────────────────────
+    // ── Save session ─────────────────────────────────────────
     const filesCreated = allResults
       .flatMap((r) => {
         const matches = r.output.matchAll(/(?:write_file|File written)[^)]*\(path:\s*"([^"]+)"\)/g);
@@ -227,13 +225,12 @@ export class Orchestrator {
       lastPlan: plan.goal,
       filesCreated: [...new Set(filesCreated)],
       timestamp: Date.now(),
-    }).catch(() => {}); // non-blocking
+    }).catch(() => {});
 
     const output = Object.entries(subtaskResults)
       .map(([taskId, results]) => {
-        const subtask = plan.subtasks.find((s) => s.id === taskId);
         const body = results.map((r) => r.output).filter(Boolean).join("\n\n");
-        return body || `(no output for ${subtask?.title || taskId})`;
+        return body || `(no output for ${taskId})`;
       })
       .filter(Boolean)
       .join("\n\n");
@@ -248,68 +245,75 @@ export class Orchestrator {
     };
   }
 
-  private async executeSubtasks(
-    plan: TaskPlan
+  // ── Pipeline Execution ────────────────────────────────────
+
+  /**
+   * Pipeline architecture: coders and reviewers run independently.
+   * When a coder finishes, it immediately frees its slot for the next task.
+   * The reviewer runs concurrently with the next coder.
+   * Re-planning happens after each subtask completes.
+   */
+  private async executePipeline(
+    taskDescription: string,
+    plan: TaskPlan,
+    architect: ArchitectAgent,
+    architectTools: ToolRegistry
   ): Promise<Record<string, AgentResult[]>> {
     const results: Record<string, AgentResult[]> = {};
-    const failed = new Set<string>();
     const completed = new Set<string>();
+    const failed = new Set<string>();
+    const inProgress = new Set<string>();
+    const semaphore = new Semaphore(this.config.orchestration.maxConcurrentAgents);
+    const activePromises: Promise<void>[] = [];
 
-    while (completed.size + failed.size < plan.subtasks.length) {
-      const ready = plan.subtasks.filter(
+    // Track review rounds per subtask (max 3)
+    const reviewRounds = new Map<string, number>();
+
+    const getReady = (): Subtask[] =>
+      plan.subtasks.filter(
         (st) =>
           !completed.has(st.id) &&
           !failed.has(st.id) &&
+          !inProgress.has(st.id) &&
           st.dependencies.every((dep) => completed.has(dep)) &&
           !st.dependencies.some((dep) => failed.has(dep))
       );
 
-      if (ready.length === 0) {
-        const blocked = plan.subtasks.filter(
-          (st) => !completed.has(st.id) && !failed.has(st.id)
+    // Seed initial ready tasks
+    const spawnReady = () => {
+      const ready = getReady();
+      for (const subtask of ready) {
+        inProgress.add(subtask.id);
+        const p = this.processSubtaskPipeline(
+          subtask,
+          plan,
+          results,
+          completed,
+          failed,
+          inProgress,
+          semaphore,
+          reviewRounds,
+          taskDescription,
+          architect,
+          architectTools,
+          spawnReady
         );
-        for (const st of blocked) {
-          console.log(chalk.yellow(`  ⏭  Skipping [${st.id}] — dependency failed`));
-          failed.add(st.id);
-        }
-        if (blocked.length === 0) {
-          console.log(chalk.red("  ⚠ No ready subtasks — possible circular dependency."));
-        }
-        break;
+        activePromises.push(p);
       }
+    };
 
-      const ids = ready.map(s => s.id).join(", ");
-      const emoji = ready.length > 1 ? "⚡" : "▶";
-      console.log(chalk.blue(`\n  ${emoji} Running: ${ids}`));
+    spawnReady();
 
-      const tasksWithContext = ready.map((st) => {
-        const depContext = st.dependencies
-          .map((dep) => {
-            const depResults = results[dep] || [];
-            const depSubtask = plan.subtasks.find((s) => s.id === dep);
-            const outputs = depResults.map((r) => `[${r.agentRole}]\n${r.output}`).join("\n");
-            return `### ${depSubtask?.title || dep}\n${outputs}`;
-          })
-          .join("\n\n");
-
-        return { subtask: st, context: depContext };
-      });
-
-      const settled = await Promise.allSettled(
-        tasksWithContext.map(({ subtask, context }) =>
-          this.runWorkerPair(subtask, context)
-        )
-      );
-
-      for (let i = 0; i < ready.length; i++) {
-        const result = settled[i];
-        if (result.status === "fulfilled") {
-          results[ready[i].id] = result.value;
-          completed.add(ready[i].id);
-        } else {
-          failed.add(ready[i].id);
-          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-          console.log(chalk.red(`  ❌ [${ready[i].id}] failed: ${reason}`));
+    // Wait for all work to complete
+    while (activePromises.length > 0) {
+      await Promise.race(activePromises);
+      // Remove settled promises
+      for (let i = activePromises.length - 1; i >= 0; i--) {
+        // Check if promise is settled by trying a race with itself
+        const p = activePromises[i];
+        const settled = await Promise.race([p.then(() => true), Promise.resolve(false)]);
+        if (settled) {
+          activePromises.splice(i, 1);
         }
       }
     }
@@ -317,99 +321,309 @@ export class Orchestrator {
     return results;
   }
 
-  private async runWorkerPair(
+  /**
+   * Process a single subtask through the coder→reviewer pipeline.
+   * Uses conversation continuity — coder keeps its full history across review loops.
+   * When done, calls spawnNew() to check for newly ready subtasks.
+   */
+  private async processSubtaskPipeline(
     subtask: Subtask,
-    depContext: string
-  ): Promise<AgentResult[]> {
-    const allResults: AgentResult[] = [];
+    plan: TaskPlan,
+    results: Record<string, AgentResult[]>,
+    completed: Set<string>,
+    failed: Set<string>,
+    inProgress: Set<string>,
+    semaphore: Semaphore,
+    reviewRounds: Map<string, number>,
+    taskDescription: string,
+    architect: ArchitectAgent,
+    architectTools: ToolRegistry,
+    spawnNew: () => void
+  ): Promise<void> {
+    const cache = new FileCache();
     const coderConfig = this.config.agents.coder;
     const reviewerConfig = this.config.agents.reviewer;
 
-    const coder = new LLMAgent(
-      {
-        role: `coder:${subtask.id}`,
-        systemPrompt: coderConfig.systemPrompt + CODER_TOOLS_PROMPT,
-      },
-      this.config.model,
-      this.provider,
-      createCoderTools(this.sandbox, this.config)
-    );
+    // Build dependency context
+    const depContext = subtask.dependencies
+      .map((dep) => {
+        const depResults = results[dep] || [];
+        const depSubtask = plan.subtasks.find((s) => s.id === dep);
+        const outputs = depResults.map((r) => `[${r.agentRole}]\n${r.output}`).join("\n");
+        return `### ${depSubtask?.title || dep}\n${outputs}`;
+      })
+      .join("\n\n");
 
-    const reviewer = new LLMAgent(
-      {
-        role: `reviewer:${subtask.id}`,
-        systemPrompt: reviewerConfig.systemPrompt + REVIEWER_TOOLS_PROMPT,
-      },
-      this.config.model,
-      this.provider,
-      createReviewerTools(this.sandbox)
-    );
+    const allResults: AgentResult[] = [];
 
-    let iteration = 0;
-    let lastCode = "";
+    try {
+      await semaphore.acquire();
 
-    while (true) {
+      console.log(chalk.blue(`\n  ┌─── ${subtask.title} ───`));
+
+      // ── Create coder with conversation continuity ──────────
+      const coder = new LLMAgent(
+        {
+          role: `coder:${subtask.id}`,
+          systemPrompt: coderConfig.systemPrompt + CODER_TOOLS_PROMPT,
+        },
+        this.config.model,
+        this.provider,
+        createCoderTools(this.sandbox, this.config, cache)
+      );
+
+      // Start coder conversation
+      const ctx = depContext ? `\n\nContext from prior subtasks:\n${depContext}` : "";
+      coder.startTask({
+        id: `task-${subtask.id}-coder`,
+        description: subtask.description,
+        messages: [{ role: "user", content: `Task: ${subtask.description}${ctx}` }],
+      });
+
+      // First coder pass
+      console.log(chalk.blue(`  │ 🛠  Coder`));
+      let iteration = 0;
+      let lastCoderOutput = "";
+
+      // Use continueChat for the initial message (empty string since startTask already added it)
+      const coderResult = await coder.continueChat(`Begin implementing the task now. Use your tools.`);
+
+      const coderAgentResult: AgentResult = {
+        taskId: `coder:${subtask.id}:${iteration}`,
+        agentRole: `coder:${subtask.id}`,
+        output: coderResult.output,
+        tokenUsage: coderResult.tokenUsage,
+        duration: 0,
+      };
+      allResults.push(coderAgentResult);
+      lastCoderOutput = coderResult.output;
       iteration++;
 
-      console.log(chalk.gray(`\n  ┌─── ${subtask.title} ─── iter ${iteration}`));
+      // ── Reviewer loop ──────────────────────────────────────
+      const maxRounds = this.maxReviewerRounds;
 
-      // ── Coder ──
-      let coderMessage: string;
-      if (iteration === 1) {
-        const ctx = depContext ? `\n\nContext from prior subtasks:\n${depContext}` : "";
-        coderMessage = `Task: ${subtask.description}${ctx}`;
-      } else {
-        const lastReview = allResults[allResults.length - 1].output;
-        coderMessage = `Task: ${subtask.description}\n\nYour previous code:\n${lastCode}\n\nReviewer feedback:\n${lastReview}\n\nImprove your code based on the feedback. Use tools to read/edit files.`;
-      }
+      while (iteration <= maxRounds) {
+        // Release semaphore during review so other tasks can code
+        semaphore.release();
 
-      console.log(chalk.blue(`  │ 🛠  Coder`));
+        // Create reviewer (fresh each round — read-only, no need for continuity)
+        const reviewer = new LLMAgent(
+          {
+            role: `reviewer:${subtask.id}`,
+            systemPrompt: reviewerConfig.systemPrompt + REVIEWER_TOOLS_PROMPT,
+          },
+          this.config.model,
+          this.provider,
+          createReviewerTools(this.sandbox)
+        );
 
-      let coderResult: AgentResult;
-      try {
-        coderResult = await coder.execute({
-          id: `task-${Date.now()}-coder-${subtask.id}-${iteration}`,
+        console.log(chalk.blue(`  │ 🔍 Reviewer (round ${iteration})`));
+
+        await semaphore.acquire();
+
+        const reviewResult = await reviewer.execute({
+          id: `task-${subtask.id}-reviewer-${iteration}`,
           description: subtask.description,
-          messages: [{ role: "user", content: coderMessage }],
+          messages: [{
+            role: "user",
+            content: `Task: ${subtask.description}\n\nCode has been written. Use tools to read files and inspect the code, then review it.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if code is good\n[STATUS: NEEDS_WORK] — if it needs improvements`,
+          }],
         });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.log(chalk.red(`  │ ❌ Coder failed: ${msg}`));
-        break;
+
+        allResults.push(reviewResult);
+
+        // Check review status
+        if (reviewResult.output.includes("[STATUS: APPROVED]") || iteration >= maxRounds) {
+          if (iteration >= maxRounds && !reviewResult.output.includes("[STATUS: APPROVED]")) {
+            console.log(chalk.yellow(`  └─ ⏰ Max review rounds reached — accepting`));
+          } else {
+            console.log(chalk.green(`  └─ ✅ Approved`));
+          }
+          break;
+        }
+
+        // ── NEEDS_WORK — continue coder conversation ─────────
+        console.log(chalk.yellow(`  │ 🔄 Needs work — sending feedback to coder`));
+        reviewRounds.set(subtask.id, (reviewRounds.get(subtask.id) || 0) + 1);
+
+        // Re-acquire for coder (already acquired above via the loop)
+        console.log(chalk.blue(`  │ 🛠  Coder (round ${iteration + 1})`));
+
+        const coderFixResult = await coder.continueChat(
+          `The reviewer found issues. Here is the review feedback:\n\n${reviewResult.output}\n\nFix the issues and improve the code. Use tools to read/edit files.`
+        );
+
+        const fixAgentResult: AgentResult = {
+          taskId: `coder:${subtask.id}:${iteration}`,
+          agentRole: `coder:${subtask.id}`,
+          output: coderFixResult.output,
+          tokenUsage: coderFixResult.tokenUsage,
+          duration: 0,
+        };
+        allResults.push(fixAgentResult);
+        lastCoderOutput = coderFixResult.output;
+        iteration++;
       }
 
-      allResults.push(coderResult);
-      lastCode = coderResult.output;
+      // Mark done
+      results[subtask.id] = allResults;
+      completed.add(subtask.id);
+      inProgress.delete(subtask.id);
 
-      // ── Reviewer ──
-      const reviewMessage = `Task: ${subtask.description}\n\nCode has been written. Use tools to read files and inspect the code, then review it.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if code is good\n[STATUS: NEEDS_WORK] — if it needs improvements`;
+      // Release semaphore
+      semaphore.release();
 
-      console.log(chalk.blue(`  │ 🔍 Reviewer`));
-
-      let reviewResult: AgentResult;
-      try {
-        reviewResult = await reviewer.execute({
-          id: `task-${Date.now()}-reviewer-${subtask.id}-${iteration}`,
-          description: subtask.description,
-          messages: [{ role: "user", content: reviewMessage }],
-        });
-      } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.log(chalk.red(`  │ ❌ Reviewer failed: ${msg}`));
-        break;
+      // ── Re-plan: ask architect if remaining plan needs adjustment ──
+      if (completed.size < plan.subtasks.length) {
+        await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools);
+        // Spawn newly ready subtasks (including any re-planned ones)
+        spawnNew();
       }
 
-      allResults.push(reviewResult);
+    } catch (err: unknown) {
+      semaphore.release();
+      inProgress.delete(subtask.id);
+      failed.add(subtask.id);
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(chalk.red(`  ❌ [${subtask.id}] failed: ${msg}`));
+      // Still spawn new tasks in case some don't depend on this
+      spawnNew();
+    }
+  }
 
-      if (reviewResult.output.includes("[STATUS: NEEDS_WORK]")) {
-        console.log(chalk.yellow(`  │ 🔄 Needs work — looping`));
-      } else {
-        console.log(chalk.green(`  └─ ✅ Approved`));
-        break;
+  // ── Re-planning ─────────────────────────────────────────
+
+  /**
+   * After a subtask completes, ask the architect if the remaining plan needs adjustment.
+   * Only re-plans if there are remaining subtasks.
+   */
+  private async maybeReplan(
+    taskDescription: string,
+    plan: TaskPlan,
+    completed: Set<string>,
+    results: Record<string, AgentResult[]>,
+    architect: ArchitectAgent,
+    architectTools: ToolRegistry
+  ): Promise<void> {
+    const remaining = plan.subtasks.filter((s) => !completed.has(s.id));
+    if (remaining.length === 0) return;
+
+    // Summarize what's been done
+    const completedSummary = plan.subtasks
+      .filter((s) => completed.has(s.id))
+      .map((s) => {
+        const res = results[s.id] || [];
+        const lastOutput = res[res.length - 1]?.output || "(no output)";
+        const preview = lastOutput.slice(0, 200);
+        return `- ${s.title}: ${preview}...`;
+      })
+      .join("\n");
+
+    const remainingSummary = remaining.map((s) => `- ${s.id}: ${s.title} — ${s.description.slice(0, 100)}`).join("\n");
+
+    // Ask architect (using a quick tool call — not a full planning pass)
+    const replanPrompt = `You planned the following task:
+
+Goal: ${plan.goal}
+
+COMPLETED subtasks:
+${completedSummary}
+
+REMAINING subtasks:
+${remainingSummary}
+
+Based on what was completed, do the remaining subtasks need changes? 
+If the remaining plan is fine as-is, respond with "NO CHANGES".
+If changes are needed, describe what subtasks to add, modify, or remove. Be specific about which subtask IDs to change.`;
+
+    try {
+      const replanResult = await architect.replan(replanPrompt);
+
+      if (replanResult.includes("NO CHANGES")) {
+        return;
       }
 
+      // Parse changes (simple heuristic — look for add/remove/modify instructions)
+      console.log(chalk.magenta(`\n  🔄 Architect adjusting plan...`));
+
+      // Ask architect to provide updated subtask list
+      const updatePrompt = `Based on your analysis, provide the UPDATED remaining subtasks as JSON array. Each subtask has: id, title, description, dependencies (array of subtask IDs).
+
+Current completed subtask IDs: ${[...completed].join(", ")}
+New subtasks should NOT duplicate completed ones.
+
+Respond with ONLY a JSON array, no other text:
+[{"id": "task-N", "title": "...", "description": "...", "dependencies": ["task-X"]}]`;
+
+      const updateResult = await architect.replan(updatePrompt);
+
+      // Try to parse JSON from the response
+      const jsonMatch = updateResult.match(/\[[\s\S]*\]/);
+      if (jsonMatch) {
+        try {
+          const newSubtasks = JSON.parse(jsonMatch[0]) as Subtask[];
+          // Validate and merge: keep completed tasks, replace remaining
+          const validNew = newSubtasks.filter(
+            (s) => !completed.has(s.id) && typeof s.title === "string" && typeof s.description === "string"
+          );
+          // Preserve completed subtasks, replace remaining with new plan
+          const keptSubtasks = plan.subtasks.filter((s) => completed.has(s.id));
+          plan.subtasks = [...keptSubtasks, ...validNew];
+
+          console.log(chalk.magenta(`  ✅ Plan updated: ${validNew.length} remaining subtask(s)`));
+          for (const s of validNew) {
+            console.log(chalk.magenta(`     └─ ${s.id}: ${s.title}`));
+          }
+        } catch {
+          console.log(chalk.gray(`  ⏭  Could not parse updated plan — keeping original`));
+        }
+      }
+    } catch {
+      // Re-planning is best-effort — don't fail the whole run
+    }
+  }
+
+  // ── Display helpers ───────────────────────────────────────
+
+  private printPlan(plan: TaskPlan): void {
+    console.log(chalk.magenta(`\n  🎯 ${plan.goal}`));
+    console.log(chalk.magenta(`  📦 ${plan.subtasks.length} subtask(s)\n`));
+    for (const st of plan.subtasks) {
+      const deps = st.dependencies.length > 0 ? chalk.gray(` → after ${st.dependencies.join(", ")}`) : "";
+      console.log(chalk.magenta(`  ┌─ ${chalk.bold(st.id)}: ${st.title}${deps}`));
+      const desc = st.description.length > 100 ? st.description.slice(0, 100) + "..." : st.description;
+      console.log(chalk.magenta(`  └─ ${chalk.dim(desc)}`));
+      console.log();
+    }
+  }
+
+  private printSummary(
+    plan: TaskPlan,
+    completedIds: string[],
+    failedIds: Subtask[],
+    duration: number,
+    totalTokens: { prompt: number; completion: number }
+  ): void {
+    console.log();
+    console.log(chalk.green(boxTop()));
+    console.log(chalk.green(boxLine(chalk.bold("📋 SUMMARY"))));
+    console.log(chalk.green(boxSep()));
+
+    for (const st of plan.subtasks) {
+      const done = completedIds.includes(st.id);
+      const icon = done ? chalk.green("✅") : chalk.red("❌");
+      console.log(chalk.green(boxLine(`  ${icon} ${st.id}: ${st.title}`)));
     }
 
-    return allResults;
+    console.log(chalk.green(boxSep()));
+    console.log(chalk.green(boxLine(`  ⏱  Duration: ${formatDuration(duration)}`)));
+    console.log(chalk.green(boxLine(`  🔧 Tokens: ${totalTokens.prompt + totalTokens.completion} total`)));
+
+    if (failedIds.length > 0) {
+      console.log(chalk.green(boxLine(`  ${chalk.yellow("⚠")}  ${failedIds.length} subtask(s) skipped`)));
+    }
+
+    console.log(chalk.green(boxBottom()));
+    console.log();
   }
 }
