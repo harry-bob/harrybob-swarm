@@ -79,7 +79,7 @@ You have tools: list_files, read_file, write_file, edit_file, run_command, web_s
 - Use write_file to create files
 - Use edit_file to modify existing files
 - Use read_file to read existing code
-- Use run_command to test your code
+- Use run_command to test your code (default 30s timeout, pass timeout param for longer)
 - Use web_search to look up documentation
 - Use list_files to explore the project
 
