@@ -235,7 +235,6 @@ swarm/
 │   └── utils/
 │       ├── logger.ts          # Colored CLI output
 │       └── timeout.ts         # Timeout utilities
-├── CLAUDE.md                  # Project docs for coding agents
 ├── AGENT.md                   # Agent architecture docs
 ├── .env.example               # Environment template
 ├── .gitignore
