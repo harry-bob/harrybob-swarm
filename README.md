@@ -1,40 +1,36 @@
 # 🐝 Swarm
 
-A CLI swarm agent developer tool with multi-agent orchestration, powered by Ollama.
-
-Swarm uses a **leader-researcher-coder-reviewer** pipeline to break down tasks, research solutions, write code, and review it — all automatically.
+A CLI multi-agent orchestration tool that uses LLM-powered agents to decompose tasks, write code, and review it — powered by Ollama.
 
 ## Features
 
-- 🧠 **Leader Agent** — Analyzes tasks, directs research, creates execution plans
-- 🔎 **Researcher Agent** — Searches the web, reads codebases, gathers information
-- 🛠 **Coder Agent** — Writes code using file tools (read, write, edit, run)
-- 🔍 **Reviewer Agent** — Reviews code for bugs, best practices, and security
+- 🧠 **Architect Agent** — Analyzes tasks, asks clarifying questions, creates execution plans
+- 🛠 **Coder Agent** — Writes code using file tools (read, write, edit, run commands)
+- 🔍 **Reviewer Agent** — Reviews code for bugs, security, and best practices
 - ⚡ **Parallel Execution** — Independent subtasks run simultaneously
-- 🔄 **Feedback Loops** — Reviewer kicks back code until it's approved
+- 🔄 **Feedback Loops** — Reviewer kicks back code until it's approved (no round limits)
 - 🌐 **Web Search** — Tavily API integration for research
-- 🔒 **Sandbox** — Agents can only access the project directory
+- 🔒 **Sandbox** — Agents are restricted to the project directory
 - 💭 **Streaming** — Real-time token streaming with thinking/reasoning display
 - 🎯 **Interactive Mode** — Chat-like terminal UI (`swarm chat`)
-- 🔧 **Fix Command** — Report bugs and have them fixed with previous context
+- 🔧 **Fix Command** — Report bugs and have them fixed using previous context
+- 📊 **Disabled Tools** — Configurable per-project tool restrictions
 
 ## Architecture
 
 ```
 User Request
       ↓
-🧠 Leader — receives task, asks clarification if needed
+🧠 Architect — analyzes task, asks questions if needed, creates plan
       ↓
-🔎 Research — leader delegates research to researcher (can iterate)
-      ↓
-📋 Plan — leader creates subtask plan with dependencies
+📋 Plan — subtasks with dependency graph
       ↓
 ⚡ Execute — coder + reviewer pairs run in parallel
   ┌─────┬─────┬─────┐
-  C→R   C→R   C→R   ← reviewer can kick back until approved
+  C→R   C→R   C→R   ← reviewer kicks back until approved
   └─────┴─────┴─────┘
       ↓
-✅ Done
+✅ Done — session saved for future context
 ```
 
 ## Installation
@@ -50,37 +46,46 @@ npm install
 # Build
 npm run build
 
-# Link globally
+# Link globally (makes `swarm` available everywhere)
 npm link
 ```
 
-## Setup
+## Prerequisites
 
-### 1. Install Ollama
+### Ollama
 
 ```bash
-# macOS / Linux
+# Install Ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
 # Pull a model
-ollama pull qwen3.5:397b-cloud
+ollama pull nemotron-3-super:cloud
 ```
 
-### 2. Set up Tavily API Key (optional, for web search)
+### Tavily API Key (optional, for web search)
 
 ```bash
 cp .env.example .env
 # Edit .env and add your Tavily API key
 ```
 
-### 3. Initialize a project
+### HuggingFace Token (optional, for benchmark access)
+
+```bash
+# Add to .env
+HF_TOKEN=your_token_here
+```
+
+## Usage
+
+### Initialize a project
 
 ```bash
 cd your-project
 swarm init
 ```
 
-## Usage
+This creates `.swarmrc.json` with your model and config.
 
 ### Run a task
 
@@ -88,11 +93,15 @@ swarm init
 swarm run "Create a Python Flask API with user authentication"
 ```
 
+The architect plans the task, then coder + reviewer pairs execute subtasks in parallel. The reviewer kicks back code until it's approved — no round limits.
+
 ### Fix a bug (uses previous context)
 
 ```bash
 swarm fix "the login endpoint returns 500 when password is empty"
 ```
+
+Loads the previous session's plan and files for context.
 
 ### Interactive mode
 
@@ -112,14 +121,8 @@ swarm chat
 ╚══════════════════════════════════════════════════════════╝
 
 > create a REST API for todo list
-  [leader] 🔎 research(query: "best Python REST API framework")
-  [leader] 📦 3 subtask(s)
+  [architect] 📦 3 subtask(s)
   [coder:task-1] ⚙ write_file(path: "app.py")
-  [reviewer:task-1] ✅ Approved
-
-> fix the POST endpoint doesn't validate empty titles
-  [leader] 🔎 research(query: "Flask request validation best practices")
-  [coder:task-1] ⚙ edit_file(path: "app.py")
   [reviewer:task-1] ✅ Approved
 ```
 
@@ -128,22 +131,15 @@ swarm chat
 ```bash
 swarm model select        # Interactive picker
 swarm model show          # Show current model
-swarm model set llama3.1  # Set directly
-swarm model list          # List available models
-```
-
-### Ollama commands
-
-```bash
-swarm ollama list  # List Ollama models
-swarm ollama test  # Test connection
+swarm model set llama3.1  # Set model directly
+swarm model list          # List available Ollama models
 ```
 
 ## Commands
 
 | Command | Description |
 |---------|-------------|
-| `swarm init` | Initialize swarm config in current directory |
+| `swarm init` | Initialize `.swarmrc.json` in current directory |
 | `swarm run <task>` | Run a task through the full pipeline |
 | `swarm fix <issue>` | Fix a bug using previous context |
 | `swarm chat` | Interactive chat mode |
@@ -151,14 +147,42 @@ swarm ollama test  # Test connection
 | `swarm model set <name>` | Set model directly |
 | `swarm model show` | Show current model |
 | `swarm model list` | List available models |
-| `swarm status` | Show configuration |
+| `swarm status` | Show configuration and last session |
 | `swarm ollama list` | List Ollama models |
-| `swarm ollama test` | Test Ollama connection |
+
+## Configuration
+
+`.swarmrc.json` is created per-project by `swarm init`:
+
+```json
+{
+  "version": "1.0.0",
+  "provider": "ollama",
+  "model": "nemotron-3-super:cloud",
+  "baseURL": "http://localhost:11434",
+  "agents": { ... },
+  "orchestration": {
+    "maxConcurrentAgents": 3,
+    "timeout": 0
+  },
+  "disabledTools": []
+}
+```
+
+### Disabling Tools
+
+Restrict tools per-project:
+
+```json
+{
+  "disabledTools": ["web_search", "research", "ask_user_question"]
+}
+```
 
 ## Tech Stack
 
-- **Runtime:** Node.js 18+ (TypeScript)
-- **LLM:** Ollama (local models, cloud models)
+- **Runtime:** Node.js 18+ (TypeScript, ESM)
+- **LLM:** Ollama (local + cloud models)
 - **Search:** Tavily API
 - **CLI:** Commander.js + custom TUI
 - **Build:** tsup
@@ -168,14 +192,14 @@ swarm ollama test  # Test connection
 ```
 swarm/
 ├── src/
-│   ├── index.ts              # Entry point (dotenv, CLI)
+│   ├── index.ts              # Entry point (dotenv, CLI bootstrap)
 │   ├── agents/
-│   │   ├── base.ts           # Agent base class
-│   │   └── llm-agent.ts      # LLM agent with tool loop + streaming
+│   │   ├── base.ts           # BaseAgent abstract class
+│   │   └── llm-agent.ts      # LLMAgent with streaming + tool calling
 │   ├── cli/
-│   │   ├── index.ts           # CLI command registration
+│   │   ├── index.ts           # Commander.js command registration
 │   │   ├── tui.ts             # Interactive terminal UI
-│   │   ├── model-picker.ts    # Model selection
+│   │   ├── model-picker.ts    # Interactive model selection
 │   │   ├── stream-renderer.ts # Streaming output renderer
 │   │   ├── tps-display.ts     # Tokens/second display
 │   │   └── commands/
@@ -187,8 +211,8 @@ swarm/
 │   │       ├── model.ts       # swarm model
 │   │       └── ollama.ts      # swarm ollama
 │   ├── core/
-│   │   ├── orchestrator.ts    # Main orchestrator (leader → plan → execute)
-│   │   ├── architect.ts       # Leader/planner agent
+│   │   ├── orchestrator.ts    # Main orchestrator pipeline
+│   │   ├── architect.ts       # Architect/planner agent
 │   │   ├── session.ts         # Session persistence
 │   │   └── types.ts           # Core types
 │   ├── config/
@@ -197,7 +221,7 @@ swarm/
 │   │   ├── types.ts           # Provider interface
 │   │   ├── stream-types.ts    # Stream chunk types
 │   │   ├── factory.ts         # Provider factory
-│   │   ├── ollama.ts          # Ollama provider (streaming + thinking)
+│   │   ├── ollama.ts          # Ollama provider
 │   │   └── openai.ts          # OpenAI provider
 │   ├── tools/
 │   │   ├── types.ts           # Tool interface
@@ -207,11 +231,13 @@ swarm/
 │   │   ├── shell.ts           # run_command
 │   │   ├── web-search.ts      # Tavily web search
 │   │   ├── user-input.ts      # ask_user_question
-│   │   └── research.ts        # Research tool (spawns researcher agent)
+│   │   └── research.ts        # Research tool
 │   └── utils/
 │       ├── logger.ts          # Colored CLI output
 │       └── timeout.ts         # Timeout utilities
-├── .env.example
+├── CLAUDE.md                  # Project docs for coding agents
+├── AGENT.md                   # Agent architecture docs
+├── .env.example               # Environment template
 ├── .gitignore
 ├── package.json
 ├── tsconfig.json

@@ -99,6 +99,11 @@ export class TUI {
       const promptStr = chalk.green(chalk.bold("> "));
 
       this.rl.question(promptStr, (answer) => {
+        // Close readline immediately so other readline instances
+        // (e.g. ask_user_question) don't conflict with stdin
+        this.rl!.close();
+        this.rl = null;
+
         const trimmed = answer.trim();
         if (!trimmed) {
           resolve("");

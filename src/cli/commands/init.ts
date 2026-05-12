@@ -22,19 +22,25 @@ export function initCommand(program: Command): void {
       // Auto-detect model from Ollama if not specified
       let model = options.model;
       if (!model && options.provider === "ollama") {
-        try {
-          const provider = new OllamaProvider({ baseURL: options.baseUrl });
-          const models = await provider.listModels();
-          if (models.length > 0) {
-            model = models[0];
-            logInfo(`Auto-detected model: ${model}`);
-          } else {
-            logWarning("No Ollama models found. Pull one with: ollama pull <model>");
+        // Check OLLAMA_MODEL env first
+        if (process.env.OLLAMA_MODEL) {
+          model = process.env.OLLAMA_MODEL;
+          logInfo(`Using model from OLLAMA_MODEL: ${model}`);
+        } else {
+          try {
+            const provider = new OllamaProvider({ baseURL: options.baseUrl });
+            const models = await provider.listModels();
+            if (models.length > 0) {
+              model = models[0];
+              logInfo(`Auto-detected model: ${model}`);
+            } else {
+              logWarning("No Ollama models found. Pull one with: ollama pull <model>");
+              model = "llama3.1";
+            }
+          } catch {
+            logWarning("Could not connect to Ollama, using default model");
             model = "llama3.1";
           }
-        } catch {
-          logWarning("Could not connect to Ollama, using default model");
-          model = "llama3.1";
         }
       } else if (!model) {
         model = "gpt-4o";

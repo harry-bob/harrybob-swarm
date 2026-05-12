@@ -16,6 +16,7 @@ interface SwarmConfig {
     maxConcurrentAgents: number;
     timeout: number;
   };
+  disabledTools?: string[];
 }
 
 interface RunOptions {
@@ -34,14 +35,18 @@ interface RunResult {
 
 // ── Tool registries (with sandbox) ──────────────────────────────
 
-function createCoderTools(sandbox: Sandbox): ToolRegistry {
+function isToolDisabled(name: string, config: SwarmConfig): boolean {
+  return (config.disabledTools || []).includes(name);
+}
+
+function createCoderTools(sandbox: Sandbox, config: SwarmConfig): ToolRegistry {
   const r = new ToolRegistry();
   r.register(createReadFileTool(sandbox));
   r.register(createWriteFileTool(sandbox));
   r.register(createEditFileTool(sandbox));
   r.register(createListFilesTool(sandbox));
   r.register(createRunCommandTool(sandbox));
-  r.register(createWebSearchTool());
+  if (!isToolDisabled("web_search", config)) r.register(createWebSearchTool());
   return r;
 }
 
@@ -53,13 +58,14 @@ function createReviewerTools(sandbox: Sandbox): ToolRegistry {
   return r;
 }
 
-function createArchitectTools(sandbox: Sandbox, provider: any, model: string): ToolRegistry {
+function createArchitectTools(sandbox: Sandbox, provider: any, model: string, config: SwarmConfig): ToolRegistry {
   const r = new ToolRegistry();
   r.register(createReadFileTool(sandbox));
   r.register(createListFilesTool(sandbox));
-  r.register(createAskUserQuestionTool());
-  r.register(createWebSearchTool());
-  r.register(createResearchTool(provider, model, sandbox));
+  if (!isToolDisabled("ask_user_question", config)) r.register(createAskUserQuestionTool());
+  if (!isToolDisabled("web_search", config)) r.register(createWebSearchTool());
+  // TEMPORARILY DISABLED — to re-enable, uncomment the line below
+  // if (!isToolDisabled("research", config)) r.register(createResearchTool(provider, model, sandbox));
   return r;
 }
 
@@ -149,7 +155,7 @@ export class Orchestrator {
     console.log(chalk.magenta.bold("🧠 PHASE 1: PLANNING"));
     console.log(chalk.magenta(`${"─".repeat(60)}`));
 
-    const architectTools = createArchitectTools(this.sandbox, this.provider, this.config.model);
+    const architectTools = createArchitectTools(this.sandbox, this.provider, this.config.model, this.config);
     const architect = new ArchitectAgent(this.provider, this.config.model, architectTools);
     const plan = await architect.plan(taskDescription);
 
@@ -326,7 +332,7 @@ export class Orchestrator {
       },
       this.config.model,
       this.provider,
-      createCoderTools(this.sandbox)
+      createCoderTools(this.sandbox, this.config)
     );
 
     const reviewer = new LLMAgent(

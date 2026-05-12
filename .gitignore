@@ -7,4 +7,7 @@ dist/
 __pycache__/
 .pytest_cache/
 .swarmrc.json
+
+# Benchmarks (not part of the main project)
 swebench/
+humaneval/
