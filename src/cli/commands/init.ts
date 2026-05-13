@@ -76,5 +76,7 @@ export function initCommand(program: Command): void {
       logInfo(`Provider: ${options.provider}`);
       logInfo(`Model: ${model}`);
       logInfo("Config saved to .swarmrc.json");
+
+      process.exit(0);
     });
 }

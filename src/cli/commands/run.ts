@@ -50,6 +50,8 @@ export function runCommand(program: Command): void {
         console.log(`⏱  Duration: ${result.duration}ms`);
         console.log(`🤖 Agents used: ${result.agentsUsed.join(", ")}`);
         console.log(`🔄 Iterations: ${result.iterations}`);
+
+        process.exit(0);
       } catch (error) {
         logError(`Task failed: ${error}`);
         process.exit(1);

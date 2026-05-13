@@ -150,5 +150,6 @@ export function chatCommand(program: Command): void {
       }
 
       tui.close();
+      process.exit(0);
     });
 }

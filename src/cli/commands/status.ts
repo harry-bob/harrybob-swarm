@@ -26,5 +26,7 @@ export function statusCommand(program: Command): void {
       console.log(`Max Concurrent: ${config.orchestration.maxConcurrentAgents}`);
       console.log(`Timeout:        ${config.orchestration.timeout}ms`);
       console.log("─".repeat(40));
+
+      process.exit(0);
     });
 }

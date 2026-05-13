@@ -85,6 +85,8 @@ export function modelCommand(program: Command): void {
       config.model = selected;
       await saveConfig(config);
       logSuccess(`Model set to: ${selected}`);
+
+      process.exit(0);
     });
 
   // swarm model show — show current model
@@ -102,6 +104,8 @@ export function modelCommand(program: Command): void {
       console.log(`  Model:     ${chalk.bold(config.model)}`);
       if (config.baseURL) console.log(`  Base URL:  ${config.baseURL}`);
       console.log();
+
+      process.exit(0);
     });
 
   // swarm model set <model> — set directly
@@ -118,6 +122,8 @@ export function modelCommand(program: Command): void {
       config.model = modelName;
       await saveConfig(config);
       logSuccess(`Model set to: ${modelName}`);
+
+      process.exit(0);
     });
 
   // swarm model list — list available models
@@ -150,5 +156,7 @@ export function modelCommand(program: Command): void {
       } catch {
         logError("Could not connect to Ollama. Make sure it's running: `ollama serve`");
       }
+
+      process.exit(0);
     });
 }

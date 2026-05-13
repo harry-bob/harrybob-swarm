@@ -37,6 +37,8 @@ export function ollamaCommand(program: Command): void {
         logError(`Failed to connect to Ollama: ${error}`);
         logInfo("Make sure Ollama is running: `ollama serve`");
       }
+
+      process.exit(0);
     });
 
   // swarm ollama pull — pull a model
@@ -57,6 +59,8 @@ export function ollamaCommand(program: Command): void {
       } catch (error) {
         logError(`Failed to pull model: ${error}`);
       }
+
+      process.exit(0);
     });
 
   // swarm ollama test — quick test of the connection
@@ -86,5 +90,7 @@ export function ollamaCommand(program: Command): void {
         logError(`Connection failed: ${error}`);
         logInfo("Make sure Ollama is running: `ollama serve`");
       }
+
+      process.exit(0);
     });
 }

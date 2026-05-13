@@ -55,6 +55,8 @@ export function fixCommand(program: Command): void {
         console.log("=".repeat(60));
         console.log(`⏱  Duration: ${result.duration}ms`);
         console.log(`🤖 Agents used: ${result.agentsUsed.join(", ")}`);
+
+        process.exit(0);
       } catch (error) {
         logError(`Fix failed: ${error}`);
         process.exit(1);
