@@ -1,13 +1,11 @@
 #!/usr/bin/env node
 
 import { config } from "dotenv";
-import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { cwd } from "node:process";
 
-// Load .env from the swarm project directory, not CWD
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
-config({ path: join(__dirname, "..", ".env") });
+// Load .env from the current working directory (user's project)
+config({ path: join(cwd(), ".env") });
 
 import { createCLI } from "./cli/index.js";
 
