@@ -6,14 +6,32 @@ Powered by [Ollama](https://ollama.com) and built in TypeScript.
 
 ## Quick Start
 
+### Install from npm (recommended)
+
+```bash
+# Install globally
+npm install -g @harrybob/swarm-cli
+
+# Or use per-project with npx
+npx @harrybob/swarm-cli init
+npx @harrybob/swarm-cli run "create a Python REST API with auth"
+```
+
+### Prerequisites
+
+You need [Ollama](https://ollama.com) running locally or a cloud endpoint:
+
 ```bash
 # Install Ollama
 curl -fsSL https://ollama.com/install.sh | sh
 
 # Pull a model
 ollama pull nemotron-3-super:cloud
+```
 
-# Clone & build swarm
+### Development install (from source)
+
+```bash
 git clone https://github.com/harry-bob/harrybob-swarm.git
 cd harrybob-swarm
 npm install
