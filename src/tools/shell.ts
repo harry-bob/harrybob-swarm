@@ -8,7 +8,7 @@ export function createRunCommandTool(sandbox: Sandbox, defaultTimeoutMs = DEFAUL
   return {
     definition: {
       name: "run_command",
-      description: "Execute a shell command and return its stdout/stderr. Use for running code, installing packages, etc. Default timeout is 30s.",
+      description: "Execute a shell command and return its stdout/stderr. Default timeout is 30s — commands killed if they exceed it. Pass timeout=N (seconds) to override.",
       parameters: {
         command: { type: "string", description: "The shell command to execute" },
         timeout: { type: "number", description: "Timeout in seconds (default: 30). Set to 0 for no timeout.", required: false },

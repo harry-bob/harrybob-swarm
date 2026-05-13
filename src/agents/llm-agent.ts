@@ -13,8 +13,10 @@ function formatToolArgs(name: string, args: Record<string, unknown>): string {
       return `path: "${args.path}"`;
     case "list_files":
       return `path: "${args.path || "."}"`;
-    case "run_command":
-      return `command: "${args.command}"`;
+    case "run_command": {
+      const timeoutSec = args.timeout != null ? Number(args.timeout) : 30;
+      return `command: "${args.command}" (timeout: ${timeoutSec}s)`;
+    }
     case "ask_user_question":
       return `question: "${(args.question as string).slice(0, 60)}..."`;
     default:
