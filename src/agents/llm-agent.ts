@@ -3,6 +3,26 @@ import { LLMProvider, ChatMessage } from "../providers/types.js";
 import { ToolRegistry } from "../tools/registry.js";
 import chalk from "chalk";
 
+const MAX_RETRIES = 5;
+const RETRY_DELAY_MS = 10_000;
+
+async function withRetry<T>(fn: () => Promise<T>, label: string, roleTag: string): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= MAX_RETRIES) break;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(chalk.yellow(`${roleTag} ⚠ ${label} failed (attempt ${attempt}/${MAX_RETRIES}): ${msg.slice(0, 120)}`));
+      console.log(chalk.gray(`${roleTag}    Retrying in ${RETRY_DELAY_MS / 1000}s...`));
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    }
+  }
+  throw lastErr;
+}
+
 function formatToolArgs(name: string, args: Record<string, unknown>): string {
   switch (name) {
     case "read_file":
@@ -160,47 +180,57 @@ export class LLMAgent extends BaseAgent {
       let tokenCount = 0;
       const streamStart = Date.now();
 
-      const stream = this.provider.chatStream({
-        model: this.model,
-        messages: this.history,
-        tools: toolDefs,
-      });
+      await withRetry(async () => {
+        content = "";
+        thinking = "";
+        toolCalls = undefined;
+        evalCount = 0;
+        thinkingActive = false;
+        contentActive = false;
+        tokenCount = 0;
 
-      for await (const chunk of stream) {
-        if (chunk.tool_calls) {
-          toolCalls = chunk.tool_calls;
-        }
+        const stream = this.provider.chatStream({
+          model: this.model,
+          messages: this.history,
+          tools: toolDefs,
+        });
 
-        if (chunk.thinking) {
-          tokenCount++;
-          if (!thinkingActive) {
-            thinkingActive = true;
-            contentActive = false;
-            process.stdout.write(chalk.dim(`\n${roleTag} 💭 `));
+        for await (const chunk of stream) {
+          if (chunk.tool_calls) {
+            toolCalls = chunk.tool_calls;
           }
-          thinking += chunk.thinking;
-          process.stdout.write(chalk.dim(chunk.thinking));
-        }
 
-        if (chunk.content) {
-          tokenCount++;
-          if (thinkingActive) {
-            thinkingActive = false;
-            contentActive = true;
-            process.stdout.write(`\n${roleTag} `);
-          } else if (!contentActive) {
-            contentActive = true;
-            process.stdout.write(`\n${roleTag} `);
+          if (chunk.thinking) {
+            tokenCount++;
+            if (!thinkingActive) {
+              thinkingActive = true;
+              contentActive = false;
+              process.stdout.write(chalk.dim(`\n${roleTag} 💭 `));
+            }
+            thinking += chunk.thinking;
+            process.stdout.write(chalk.dim(chunk.thinking));
           }
-          content += chunk.content;
-          process.stdout.write(chunk.content);
-        }
 
-        if (chunk.done) {
-          if (thinkingActive) thinkingActive = false;
-          if (chunk.tokenCount) evalCount = chunk.tokenCount;
+          if (chunk.content) {
+            tokenCount++;
+            if (thinkingActive) {
+              thinkingActive = false;
+              contentActive = true;
+              process.stdout.write(`\n${roleTag} `);
+            } else if (!contentActive) {
+              contentActive = true;
+              process.stdout.write(`\n${roleTag} `);
+            }
+            content += chunk.content;
+            process.stdout.write(chunk.content);
+          }
+
+          if (chunk.done) {
+            if (thinkingActive) thinkingActive = false;
+            if (chunk.tokenCount) evalCount = chunk.tokenCount;
+          }
         }
-      }
+      }, "LLM stream", roleTag);
 
       if (thinkingActive || contentActive) {
         process.stdout.write("\n");

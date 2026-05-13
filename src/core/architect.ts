@@ -40,6 +40,26 @@ You MUST respond with ONLY a valid JSON object — no markdown fences, no preamb
   ]
 }`;
 
+const MAX_RETRIES = 5;
+const RETRY_DELAY_MS = 10_000;
+
+async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastErr = err;
+      if (attempt >= MAX_RETRIES) break;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(chalk.yellow(`[architect] ⚠ ${label} failed (attempt ${attempt}/${MAX_RETRIES}): ${msg.slice(0, 120)}`));
+      console.log(chalk.gray(`[architect]    Retrying in ${RETRY_DELAY_MS / 1000}s...`));
+      await new Promise((r) => setTimeout(r, RETRY_DELAY_MS));
+    }
+  }
+  throw lastErr;
+}
+
 export class ArchitectAgent {
   private provider: LLMProvider;
   private model: string;
@@ -66,11 +86,11 @@ export class ArchitectAgent {
     while (true) {
       rounds++;
 
-      const response = await this.provider.chat({
+      const response = await withRetry(() => this.provider.chat({
         model: this.model,
         messages,
         tools: toolDefs,
-      });
+      }), "chat");
 
       // If the architect wants to use tools first (e.g., inspect existing codebase)
       if (response.tool_calls && response.tool_calls.length > 0) {
@@ -126,11 +146,11 @@ export class ArchitectAgent {
       { role: "user", content: prompt },
     ];
 
-    const response = await this.provider.chat({
+    const response = await withRetry(() => this.provider.chat({
       model: this.model,
       messages,
       responseFormat: { type: "json_object" },
-    });
+    }), "replan");
 
     return response.content || "NO CHANGES";
   }
