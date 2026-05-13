@@ -342,7 +342,11 @@ export class Orchestrator {
           architect,
           architectTools,
           spawnReady
-        );
+        ).finally(() => {
+          // Auto-remove from active list when this subtask finishes
+          const idx = activePromises.indexOf(p);
+          if (idx !== -1) activePromises.splice(idx, 1);
+        });
         activePromises.push(p);
       }
     };
@@ -351,16 +355,7 @@ export class Orchestrator {
 
     // Wait for all work to complete
     while (activePromises.length > 0) {
-      await Promise.race(activePromises);
-      // Remove settled promises
-      for (let i = activePromises.length - 1; i >= 0; i--) {
-        // Check if promise is settled by trying a race with itself
-        const p = activePromises[i];
-        const settled = await Promise.race([p.then(() => true), Promise.resolve(false)]);
-        if (settled) {
-          activePromises.splice(i, 1);
-        }
-      }
+      await Promise.race(activePromises).catch(() => {});
     }
 
     return results;
