@@ -14,6 +14,7 @@ export interface ChatOptions {
   tools?: ToolDefinition[];
   temperature?: number;
   maxTokens?: number;
+  responseFormat?: { type: "json_object" };
 }
 
 export interface ChatResponse {

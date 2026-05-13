@@ -97,11 +97,15 @@ You have these tools: list_files, read_file, write_file, edit_file, run_command,
 - list_files — explore project structure
 
 ## Completion Criteria
-Before finishing, ensure:
-- All requested changes are implemented in actual files
-- Verification commands have been run and passed
-- Error handling and edge cases are addressed
-- No TODOs or placeholder code remains`;
+Before finishing, you MUST run a SELF-REVIEW:
+1. Read back any files you created or modified — do they match your intent?
+2. Check for bugs: off-by-one errors, null references, unhandled promises, missing imports
+3. Check edge cases: empty inputs, invalid data, error paths
+4. Verify tests/build/commands pass — if none exist, write a minimal verification script
+5. Ensure no TODOs, placeholders, or dead code remain
+
+Only declare the task complete after the self-review passes.
+`;
 
 const REVIEWER_TOOLS_PROMPT = `
 

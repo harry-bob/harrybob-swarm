@@ -33,6 +33,11 @@ export class LLMAgent extends BaseAgent {
   private provider: LLMProvider;
   private tools: ToolRegistry;
   private history: ChatMessage[] = [];
+  private toolCache = new Map<string, string>();
+  private readonly READONLY_TOOLS = new Set(["read_file", "list_files", "web_search"]);
+  private readonly MAX_HISTORY = 32; // trigger compaction
+  private readonly KEEP_RECENT = 8;  // keep last N messages intact
+  private readonly KEEP_FIRST = 2;   // keep system + initial user message
 
   constructor(config: AgentConfig, model: string, provider: LLMProvider, tools: ToolRegistry) {
     super(config, model);
@@ -45,6 +50,7 @@ export class LLMAgent extends BaseAgent {
    */
   startTask(task: AgentTask): void {
     this.history = this.buildMessages(task);
+    this.toolCache.clear();
   }
 
   /**
@@ -71,6 +77,7 @@ export class LLMAgent extends BaseAgent {
    */
   resetHistory(): void {
     this.history = [];
+    this.toolCache.clear();
   }
 
   /**
@@ -90,9 +97,45 @@ export class LLMAgent extends BaseAgent {
   }
 
   /**
-   * Core LLM loop: stream response, execute tool calls (in parallel), repeat.
-   * Operates on this.history — appends messages in place.
+   * Compact conversation history when it grows too long.
+   * Keeps system prompt + initial task, keeps recent turns intact,
+   * and summarizes middle turns to prevent context-window pressure.
    */
+  private compactHistory(): void {
+    if (this.history.length <= this.MAX_HISTORY) return;
+
+    const keptHead = this.history.slice(0, this.KEEP_FIRST);
+    const keptTail = this.history.slice(-this.KEEP_RECENT);
+    const middle = this.history.slice(this.KEEP_FIRST, -this.KEEP_RECENT);
+
+    // Summarize middle section by collapsing assistant+tool pairs
+    const summaries: string[] = [];
+    for (let i = 0; i < middle.length; i++) {
+      const msg = middle[i];
+      if (msg.role === "assistant" && msg.tool_calls && msg.tool_calls.length > 0) {
+        const toolNames = msg.tool_calls.map((tc) => tc.name).join(", ");
+        summaries.push(`Called tools: ${toolNames}`);
+      } else if (msg.role === "user" && msg.content.startsWith('Tool "')) {
+        // Truncate tool results in the middle to ~120 chars
+        const short = msg.content.slice(0, 120).replace(/\n/g, " ");
+        summaries.push(short + (msg.content.length > 120 ? "..." : ""));
+      } else if (msg.role === "assistant") {
+        const short = msg.content.slice(0, 120).replace(/\n/g, " ");
+        summaries.push(short + (msg.content.length > 120 ? "..." : ""));
+      }
+    }
+
+    const compacted: ChatMessage[] = [
+      ...keptHead,
+      {
+        role: "system",
+        content: `[Context compressed] Earlier steps summarized:\n${summaries.join("\n")}`,
+      },
+      ...keptTail,
+    ];
+
+    this.history = compacted;
+  }
   private async runLoop(): Promise<{ output: string; tokenUsage: { prompt: number; completion: number } }> {
     const toolDefs = this.tools.getDefinitions();
     const roleTag = chalk.cyan(`[${this.config.role}]`);
@@ -102,6 +145,9 @@ export class LLMAgent extends BaseAgent {
     let finalContent = "";
 
     while (true) {
+      // Prevent context-window bloat during long review loops
+      this.compactHistory();
+
       // ── Stream the LLM response ──────────────────────────────
       let content = "";
       let thinking = "";
@@ -187,6 +233,17 @@ export class LLMAgent extends BaseAgent {
       const results = await Promise.all(
         toolCalls.map(async (toolCall) => {
           const argsStr = formatToolArgs(toolCall.name, toolCall.arguments);
+
+          // Check read-only tool cache
+          const cacheKey = `${toolCall.name}:${JSON.stringify(toolCall.arguments)}`;
+          if (this.READONLY_TOOLS.has(toolCall.name) && this.toolCache.has(cacheKey)) {
+            const cached = this.toolCache.get(cacheKey)!;
+            console.log(`${roleTag} ${chalk.yellow("⚙")} ${chalk.bold(toolCall.name)}(${argsStr}) ${chalk.gray("[cached]")}`);
+            const preview = formatToolResult(toolCall.name, cached);
+            console.log(`${roleTag} ${chalk.green("→")} ${preview.split("\n").join("\n" + roleTag + "   ")}`);
+            return { id: toolCall.id, name: toolCall.name, output: cached };
+          }
+
           console.log(`${roleTag} ${chalk.yellow("⚙")} ${chalk.bold(toolCall.name)}(${argsStr})`);
 
           let output: string;
@@ -195,6 +252,11 @@ export class LLMAgent extends BaseAgent {
           } catch (err: unknown) {
             const msg = err instanceof Error ? err.message : String(err);
             output = `Error: ${msg}`;
+          }
+
+          // Cache read-only results
+          if (this.READONLY_TOOLS.has(toolCall.name)) {
+            this.toolCache.set(cacheKey, output);
           }
 
           const preview = formatToolResult(toolCall.name, output);

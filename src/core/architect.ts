@@ -129,6 +129,7 @@ export class ArchitectAgent {
     const response = await this.provider.chat({
       model: this.model,
       messages,
+      responseFormat: { type: "json_object" },
     });
 
     return response.content || "NO CHANGES";

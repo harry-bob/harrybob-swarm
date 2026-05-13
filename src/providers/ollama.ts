@@ -64,6 +64,10 @@ export class OllamaProvider implements LLMProvider {
       }));
     }
 
+    if (options.responseFormat?.type === "json_object") {
+      body.format = "json";
+    }
+
     return body;
   }
 
