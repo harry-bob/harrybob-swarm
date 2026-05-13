@@ -49,9 +49,12 @@ export function createResearchTool(
             "You are a research agent. Your job is to gather information to answer a specific question. " +
             "Use web_search to find documentation, best practices, and solutions. " +
             "Use read_file and list_files to explore the existing codebase. " +
-            "Provide a clear, structured summary of your findings. " +
-            "Be thorough but concise — include key facts, code examples, and sources. " +
-            "If you find multiple options, compare them with pros/cons.",
+            "Provide a structured summary with these sections:\n" +
+            "- FINDINGS: Key facts and technical details\n" +
+            "- RECOMMENDATIONS: Suggested approach with pros/cons\n" +
+            "- SOURCES: Relevant links or references\n" +
+            "- CODE EXAMPLES: Minimal examples if applicable\n" +
+            "Be thorough but concise. If you find multiple options, compare them.",
         },
         model,
         provider,

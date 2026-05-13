@@ -144,8 +144,8 @@ export function createListFilesTool(sandbox: Sandbox): Tool {
           return !name.startsWith(".") || name === ".swarmrc.json";
         });
         const lines = filtered.map((e) => {
-          const icon = e.isDirectory() ? "📁" : "📄";
-          return `${icon} ${e.name}`;
+          const isDir = e.isDirectory();
+          return `${isDir ? "[DIR]" : "[FILE]"} ${e.name}`;
         });
         return lines.join("\n") || "(empty directory)";
       } catch (err: unknown) {

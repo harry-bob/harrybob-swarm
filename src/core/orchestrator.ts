@@ -73,22 +73,57 @@ function createArchitectTools(sandbox: Sandbox, provider: any, model: string, co
 
 const CODER_TOOLS_PROMPT = `
 
-You have tools: list_files, read_file, write_file, edit_file, run_command, web_search.
+## Your Tools
+You have these tools: list_files, read_file, write_file, edit_file, run_command, web_search.
 
-⚠️ IMPORTANT: You MUST use tools to complete the task. Do NOT just describe what you would do — actually create files, run commands, and verify your work.
-- Use write_file to create files
-- Use edit_file to modify existing files
-- Use read_file to read existing code
-- Use run_command to test your code (default 30s timeout, pass timeout param for longer)
-- Use web_search to look up documentation
-- Use list_files to explore the project
+## Core Rules
+- You MUST use tools to complete the task. Do NOT just describe what you would do — actually create files, run commands, and verify your work.
+- You are NOT done until you have created/modified files AND run verification commands to prove the code works.
+- A response without tool calls is not acceptable.
+- All file operations are restricted to the project directory.
 
-You are NOT done until you have used tools to create/modify files and verified they work. A response without tool calls is not acceptable.
-All file operations are restricted to the project directory.`;
+## Execution Protocol
+1. EXPLORE: Use list_files and read_file to understand existing code before making changes.
+2. IMPLEMENT: Use write_file for new files, edit_file for modifications. edit_file requires the EXACT old text match.
+3. VERIFY: Run tests, build commands, or the code itself to prove correctness. Fix any failures immediately.
+4. EDGE CASES: Handle errors, null inputs, and boundary conditions explicitly.
 
-const REVIEWER_TOOLS_PROMPT = `\n\nYou have read-only tools: list_files, read_file, run_command.
-Inspect code and run tests. Do NOT write or edit files — provide feedback for the coder.
-End your review with EXACTLY one line: [STATUS: APPROVED] — if code is good or [STATUS: NEEDS_WORK] — if it needs improvements.`;
+## Tool Usage
+- write_file — create new files with complete content
+- edit_file — modify existing files (oldText must match exactly)
+- read_file — read code before editing
+- run_command — test/build/run code (default 30s timeout, pass timeout param for longer)
+- web_search — look up documentation or error solutions
+- list_files — explore project structure
+
+## Completion Criteria
+Before finishing, ensure:
+- All requested changes are implemented in actual files
+- Verification commands have been run and passed
+- Error handling and edge cases are addressed
+- No TODOs or placeholder code remains`;
+
+const REVIEWER_TOOLS_PROMPT = `
+
+## Your Tools
+You have read-only tools: list_files, read_file, run_command.
+You may NOT write or edit files.
+
+## Review Protocol
+1. INSPECT: Read all modified and relevant files. Run any existing tests or the code itself.
+2. EVALUATE against this checklist:
+   - CORRECTNESS: Does the code do what the task requires? Are there logic bugs or off-by-one errors?
+   - SECURITY: Are there injection risks, unsafe inputs, or leaked secrets?
+   - PERFORMANCE: Any obvious inefficiencies, N+1 queries, or unnecessary complexity?
+   - TESTS: Are there tests? Do they pass? If not, what evidence proves the code works?
+   - STYLE: Is the code clean, consistent with the existing codebase, and well-documented?
+   - EDGE CASES: Are errors and boundary conditions handled?
+3. FEEDBACK: Provide specific, actionable feedback with file names and line references where applicable.
+
+## Status
+End your review with EXACTLY one line:
+[STATUS: APPROVED] — if all checklist items pass
+[STATUS: NEEDS_WORK] — if any item fails, with specific required fixes listed above`;
 
 
 // ── Semaphore for concurrency control ─────────────────────────
@@ -377,7 +412,7 @@ export class Orchestrator {
       coder.startTask({
         id: `task-${subtask.id}-coder`,
         description: subtask.description,
-        messages: [{ role: "user", content: `Task: ${subtask.description}${ctx}` }],
+        messages: [{ role: "user", content: `Task: ${subtask.description}${ctx}\n\nBegin implementing the task now. Use your tools.` }],
       });
 
       // First coder pass
@@ -385,8 +420,8 @@ export class Orchestrator {
       let iteration = 0;
       let lastCoderOutput = "";
 
-      // Use continueChat for the initial message (empty string since startTask already added it)
-      const coderResult = await coder.continueChat(`Begin implementing the task now. Use your tools.`);
+      // Use continueChat with empty string since startTask already added the message
+      const coderResult = await coder.continueChat("");
 
       const coderAgentResult: AgentResult = {
         taskId: `coder:${subtask.id}:${iteration}`,

@@ -52,7 +52,10 @@ export class LLMAgent extends BaseAgent {
    * Returns the agent's response (final text after all tool calls).
    */
   async continueChat(userMessage: string): Promise<{ output: string; tokenUsage: { prompt: number; completion: number } }> {
-    this.history.push({ role: "user", content: userMessage });
+    // Only add user message if it's not empty
+    if (userMessage.trim()) {
+      this.history.push({ role: "user", content: userMessage });
+    }
     return this.runLoop();
   }
 
@@ -201,12 +204,13 @@ export class LLMAgent extends BaseAgent {
         })
       );
 
-      // Add all tool results to history
+      // Add tool results as user messages (workaround for Ollama cloud models)
+      // Cloud models through Ollama don't properly process role: "tool" messages
+      // so we embed results as user messages instead
       for (const result of results) {
         this.history.push({
-          role: "tool",
-          content: result.output,
-          tool_call_id: result.id,
+          role: "user",
+          content: `Tool "${result.name}" result:\n${result.output}`,
         });
       }
     }
