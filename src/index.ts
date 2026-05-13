@@ -12,4 +12,9 @@ config({ path: join(__dirname, "..", ".env") });
 import { createCLI } from "./cli/index.js";
 
 const cli = createCLI();
-cli.parse(process.argv);
+cli.parseAsync(process.argv)
+  .then(() => process.exit(0))
+  .catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });

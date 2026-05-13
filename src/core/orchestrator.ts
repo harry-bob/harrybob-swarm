@@ -5,6 +5,7 @@ import { TaskPlan, Subtask } from "./types.js";
 import { createProvider } from "../providers/factory.js";
 import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool } from "../tools/index.js";
 import { saveSession } from "./session.js";
+import { withTimeout } from "../utils/timeout.js";
 import chalk from "chalk";
 
 interface SwarmConfig {
@@ -205,6 +206,11 @@ export class Orchestrator {
   }
 
   async run(taskDescription: string, options: RunOptions = {}): Promise<RunResult> {
+    const timeoutMs = this.config.orchestration.timeout || 600_000; // default 10 min
+    return withTimeout(this._run(taskDescription, options), timeoutMs, "Swarm run");
+  }
+
+  private async _run(taskDescription: string, options: RunOptions = {}): Promise<RunResult> {
     const startTime = Date.now();
 
     // ── Banner ────────────────────────────────────────────────
