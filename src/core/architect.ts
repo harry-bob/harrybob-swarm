@@ -48,6 +48,11 @@ Gather enough context about the project structure, existing code, and relevant t
 5. EXTERNAL KNOWLEDGE: If the task involves unfamiliar libraries or APIs, use web_search or research to gather context.
 6. CLARIFY: Only use ask_user_question if the task has genuinely ambiguous requirements after investigation.
 
+## Efficiency Rules
+- Do NOT call the same tool with the same arguments more than once. Previous tool results are in the conversation history.
+- After listing a directory, read the specific files you need — do not re-list the same directory.
+- After reading a file, do not read it again unless you suspect it changed.
+
 ## Output Format
 After your investigation, produce a structured REPORT with these sections:
 - PROJECT_SUMMARY: Tech stack, key directories, entry points
@@ -129,6 +134,8 @@ export class ArchitectAgent {
   private provider: LLMProvider;
   private model: string;
   private tools: ToolRegistry;
+  private toolCache = new Map<string, string>();
+  private readonly CACHEABLE_TOOLS = new Set(["read_file", "list_files", "web_search"]);
 
   constructor(provider: LLMProvider, model: string, tools: ToolRegistry) {
     this.provider = provider;
@@ -218,11 +225,21 @@ export class ArchitectAgent {
             .join(", ");
           console.log(chalk.magenta(`[architect] ⚙ ${toolCall.name}(${argsStr})`));
 
+          const cacheKey = `${toolCall.name}:${JSON.stringify(toolCall.arguments)}`;
           let output: string;
-          try {
-            output = await this.tools.execute(toolCall.name, toolCall.arguments);
-          } catch (err: unknown) {
-            output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+
+          if (this.CACHEABLE_TOOLS.has(toolCall.name) && this.toolCache.has(cacheKey)) {
+            output = this.toolCache.get(cacheKey)!;
+            console.log(chalk.magenta(`[architect] ⚙ ${toolCall.name}(${argsStr}) ${chalk.gray("[cached]")}`));
+          } else {
+            try {
+              output = await this.tools.execute(toolCall.name, toolCall.arguments);
+            } catch (err: unknown) {
+              output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+            }
+            if (this.CACHEABLE_TOOLS.has(toolCall.name)) {
+              this.toolCache.set(cacheKey, output);
+            }
           }
 
           messages.push({
