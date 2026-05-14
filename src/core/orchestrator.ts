@@ -3,7 +3,7 @@ import { AgentResult } from "../agents/base.js";
 import { ArchitectAgent } from "./architect.js";
 import { TaskPlan, Subtask } from "./types.js";
 import { createProvider } from "../providers/factory.js";
-import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool } from "../tools/index.js";
+import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool, createReviewerTestTool } from "../tools/index.js";
 import { saveSession } from "./session.js";
 import { withTimeout } from "../utils/timeout.js";
 import chalk from "chalk";
@@ -51,12 +51,13 @@ function createCoderTools(sandbox: Sandbox, config: SwarmConfig, cache?: FileCac
   return r;
 }
 
-function createReviewerTools(sandbox: Sandbox): ToolRegistry {
+function createReviewerTools(sandbox: Sandbox, taskId: string, reviewerIndex: number): ToolRegistry {
   const r = new ToolRegistry();
   r.register(createReadFileTool(sandbox));
   r.register(createListFilesTool(sandbox));
   r.register(createRunCommandTool(sandbox));
   r.register(createWriteFileTool(sandbox));
+  r.register(createReviewerTestTool(sandbox, taskId, reviewerIndex));
   return r;
 }
 
@@ -111,19 +112,21 @@ Only declare the task complete after the self-review passes.
 const REVIEWER_TOOLS_PROMPT = `
 
 ## Your Tools
-You have these tools: list_files, read_file, write_file, run_command.
+You have these tools: list_files, read_file, write_file, run_command, do_test.
 
 ## Review Protocol
-1. INSPECT: Read all modified and relevant files. Run any existing tests or the code itself.
-2. WRITE INDEPENDENT TEST: Create your OWN test / verification script to prove the subtask works correctly. Do NOT rely on tests written by the coder — write a fresh one that exercises the behavior from a different angle.
-   - Write the test script to a file. Use a unique filename so it does not collide with the other reviewer (e.g., .swarm-review-reviewer{N}-<subtask-id>.test.ts).
+1. INSPECT: Read all modified and relevant files.
+2. WRITE INDEPENDENT TEST: Use **do_test(code)** to create and run your OWN test / verification script. Do NOT rely on tests written by the coder — write a fresh one that exercises the behavior from a different angle.
+   - Pass the complete test code to do_test. It will be saved to test/{taskId}/reviewer{index}/ and executed automatically.
    - The test must exercise actual behavior: call functions, check outputs, assert edge cases.
-   - Use run_command to execute your test script.
+   - Include the testing framework and assertions directly in your code — do not assume external test runners like jest or pytest are installed. Use built-in asserts (Node assert, Python assert, console.assert, etc.).
+   - The execution result is returned to you. Report whether it passed or failed.
+   - If you need to create auxiliary files (test data, mocks), use write_file.
 3. EVALUATE against this checklist:
    - CORRECTNESS: Does the code do what the task requires? Are there logic bugs or off-by-one errors?
    - SECURITY: Are there injection risks, unsafe inputs, or leaked secrets?
    - PERFORMANCE: Any obvious inefficiencies, N+1 queries, or unnecessary complexity?
-   - TESTS: Did YOUR independent test pass? If it failed, report exactly what failed.
+   - TESTS: Did YOUR independent test (via do_test) pass? If it failed, report exactly what failed.
    - STYLE: Is the code clean, consistent with the existing codebase, and well-documented?
    - EDGE CASES: Are errors and boundary conditions handled?
 4. FEEDBACK: Provide specific, actionable feedback with file names and line references where applicable.
@@ -704,7 +707,7 @@ Respond with ONLY a JSON object, no other text:
       },
       this.config.model,
       this.provider,
-      createReviewerTools(this.sandbox)
+      createReviewerTools(this.sandbox, subtask.id, reviewerIndex)
     );
 
     const filesList = modifiedFiles.length > 0
@@ -720,7 +723,7 @@ Respond with ONLY a JSON object, no other text:
       description: subtask.description,
       messages: [{
         role: "user",
-        content: `Task: ${subtask.description}\n\n${filesList}\n\n${summaryBlock}\n\nReview the code. Read the files listed above, WRITE YOUR OWN INDEPENDENT TEST SCRIPT, run it, and report your findings.\n\n- Write your test to a unique file (e.g. .swarm-review-${subtask.id}-${reviewerIndex}.test.ts or similar) so it does not conflict with the other reviewer.\n- Run your test with run_command.\n- Report whether your test passed or failed.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if all checklist items pass AND your independent test passed\n[STATUS: NEEDS_WORK] — if any item fails or your test failed`,
+        content: `Task: ${subtask.description}\n\n${filesList}\n\n${summaryBlock}\n\nReview the code. Read the files listed above, then use **do_test** to write and execute your OWN independent test script.\n\n- do_test(code) saves your test to test/${subtask.id}/reviewer${reviewerIndex}/ and runs it automatically.\n- Include assertions directly in your code. Use built-in assert (Node: require('assert'), Python: assert, etc.).\n- The execution result is returned to you. Report whether your test passed or failed.\n- If you need auxiliary files (test data, mocks), use write_file.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if all checklist items pass AND your independent test passed\n[STATUS: NEEDS_WORK] — if any item fails or your test failed`,
       }],
     });
   }

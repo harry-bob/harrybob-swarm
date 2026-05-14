@@ -28,7 +28,7 @@ function killTree(child: ChildProcess, isUnix: boolean): void {
   }
 }
 
-function runCommand(command: string, cwd: string, timeoutMs: number): Promise<string> {
+export function runCommand(command: string, cwd: string, timeoutMs: number): Promise<string> {
   return new Promise((resolve) => {
     let resolved = false;
     let killed = false;

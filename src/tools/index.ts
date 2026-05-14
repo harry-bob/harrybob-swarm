@@ -6,3 +6,4 @@ export { createRunCommandTool } from "./shell.js";
 export { createAskUserQuestionTool } from "./user-input.js";
 export { createWebSearchTool } from "./web-search.js";
 export { createResearchTool } from "./research.js";
+export { createReviewerTestTool } from "./reviewer-test.js";
