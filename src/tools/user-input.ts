@@ -36,7 +36,12 @@ export function createAskUserQuestionTool(): Tool {
       const question = args.question as string;
       if (!question) return "Error: No question provided";
 
+      // Signal TUI (if active) to suspend so the prompt appears clearly
+      process.emit("swarm::interactivePromptStart", undefined);
+
       const answer = await askUser(question);
+
+      process.emit("swarm::interactivePromptEnd", undefined);
 
       if (!answer) {
         return "(User provided no answer. Proceed with reasonable defaults.)";

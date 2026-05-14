@@ -5,7 +5,15 @@ import { join } from "node:path";
 import { cwd } from "node:process";
 
 // Load .env from the current working directory (user's project)
-config({ path: join(cwd(), ".env") });
+const envPath = join(cwd(), ".env");
+const envResult = config({ path: envPath });
+if (envResult.error) {
+  console.error(`[swarm] dotenv failed to load ${envPath}: ${envResult.error.message}`);
+} else if (!envResult.parsed?.TAVILY_API_KEY) {
+  console.error(`[swarm] Warning: TAVILY_API_KEY not found in ${envPath}`);
+} else {
+  console.error(`[swarm] Loaded .env from ${envPath}`);
+}
 
 import { createCLI } from "./cli/index.js";
 

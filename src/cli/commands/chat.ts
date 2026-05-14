@@ -6,25 +6,13 @@ import { promptModelSelection } from "../model-picker.js";
 import { TUI } from "../tui.js";
 import chalk from "chalk";
 
-export function chatCommand(program: Command): void {
-  program
-    .command("chat")
-    .description("Start an interactive chat session")
-    .option("--model <model>", "Override model")
+export async function runChat(config: import("../../config/config.js").SwarmConfig, options?: { model?: string }): Promise<void> {
+  if (options?.model) config.model = options.model;
 
-    .action(async (options) => {
-      const config = await loadConfig();
-      if (!config) {
-        console.log(chalk.red("No swarm configuration found. Run `swarm init` first."));
-        process.exit(1);
-      }
-
-      if (options.model) config.model = options.model;
-
-      const tui = new TUI({
-        model: config.model,
-        provider: config.provider,
-      });
+  const tui = new TUI({
+    model: config.model,
+    provider: config.provider,
+  });
 
 
 
@@ -71,7 +59,9 @@ export function chatCommand(program: Command): void {
           const cmd = tui.parseModelCommand(input);
           switch (cmd.action) {
             case "select": {
+              tui.suspend();
               const choice = await promptModelSelection(config.model, config.baseURL);
+              tui.unsuspend();
               config.model = choice.model;
               if (choice.baseURL) config.baseURL = choice.baseURL;
               await saveConfig(config);
@@ -146,10 +136,25 @@ export function chatCommand(program: Command): void {
           tui.printError(`Task failed: ${msg}`);
         }
 
-        console.log();
+        // spacing before next prompt
+        tui.printSystem("");
       }
 
-      tui.close();
-      process.exit(0);
+  tui.close();
+  process.exit(0);
+}
+
+export function chatCommand(program: Command): void {
+  program
+    .command("chat")
+    .description("Start an interactive chat session")
+    .option("--model <model>", "Override model")
+    .action(async (options) => {
+      const config = await loadConfig();
+      if (!config) {
+        console.log(chalk.red("No swarm configuration found. Run `swarm init` first."));
+        process.exit(1);
+      }
+      await runChat(config, options);
     });
 }

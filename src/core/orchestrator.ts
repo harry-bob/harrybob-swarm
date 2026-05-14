@@ -412,10 +412,17 @@ export class Orchestrator {
 
       // Start coder conversation
       const ctx = depContext ? `\n\nContext from prior subtasks:\n${depContext}` : "";
+      const fileHints = subtask.filesExpected
+        ? `\n\nFiles you are expected to create or modify: ${subtask.filesExpected.join(", ")}`
+        : "";
+      const complexityHint = subtask.estimatedComplexity
+        ? `\nEstimated complexity: ${subtask.estimatedComplexity}`
+        : "";
+
       coder.startTask({
         id: `task-${subtask.id}-coder`,
         description: subtask.description,
-        messages: [{ role: "user", content: `Task: ${subtask.description}${ctx}\n\nBegin implementing the task now. Use your tools.` }],
+        messages: [{ role: "user", content: `Task: ${subtask.description}${ctx}${fileHints}${complexityHint}\n\nBegin implementing the task now. Use your tools.` }],
       });
 
       // First coder pass
@@ -638,33 +645,47 @@ If changes are needed, describe what subtasks to add, modify, or remove. Be spec
       // Parse changes (simple heuristic — look for add/remove/modify instructions)
       console.log(chalk.magenta(`\n  🔄 Architect adjusting plan...`));
 
-      // Ask architect to provide updated subtask list
-      const updatePrompt = `Based on your analysis, provide the UPDATED remaining subtasks as JSON array. Each subtask has: id, title, description, dependencies (array of subtask IDs).
+      // Ask architect to provide updated remaining subtasks as full JSON
+      const updatePrompt = `Based on your analysis, provide the UPDATED remaining subtasks as a JSON object matching the task plan schema.
 
 Current completed subtask IDs: ${[...completed].join(", ")}
 New subtasks should NOT duplicate completed ones.
 
-Respond with ONLY a JSON array, no other text:
-[{"id": "task-N", "title": "...", "description": "...", "dependencies": ["task-X"]}]`;
+Respond with ONLY a JSON object, no other text:
+{
+  "goal": "${plan.goal}",
+  "rationale": "...",
+  "subtasks": [
+    {
+      "id": "task-N",
+      "title": "...",
+      "description": "...",
+      "dependencies": ["task-X"],
+      "verification": "...",
+      "filesExpected": ["src/foo.ts"],
+      "estimatedComplexity": "medium"
+    }
+  ]
+}`;
 
       const updateResult = await architect.replan(updatePrompt);
 
       // Try to parse JSON from the response
-      const jsonMatch = updateResult.match(/\[[\s\S]*\]/);
+      const jsonMatch = updateResult.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         try {
-          const newSubtasks = JSON.parse(jsonMatch[0]) as Subtask[];
-          // Validate and merge: keep completed tasks, replace remaining
-          const validNew = newSubtasks.filter(
+          const newPlan = JSON.parse(jsonMatch[0]) as TaskPlan;
+          const validNew = (newPlan.subtasks || []).filter(
             (s) => !completed.has(s.id) && typeof s.title === "string" && typeof s.description === "string"
           );
-          // Preserve completed subtasks, replace remaining with new plan
           const keptSubtasks = plan.subtasks.filter((s) => completed.has(s.id));
           plan.subtasks = [...keptSubtasks, ...validNew];
+          if (newPlan.rationale) plan.rationale = newPlan.rationale;
 
           console.log(chalk.magenta(`  ✅ Plan updated: ${validNew.length} remaining subtask(s)`));
           for (const s of validNew) {
-            console.log(chalk.magenta(`     └─ ${s.id}: ${s.title}`));
+            const files = s.filesExpected ? chalk.gray(` 📄 ${s.filesExpected.join(", ")}`) : "";
+            console.log(chalk.magenta(`     └─ ${s.id}: ${s.title}${files}`));
           }
         } catch {
           console.log(chalk.gray(`  ⏭  Could not parse updated plan — keeping original`));
@@ -731,12 +752,21 @@ Respond with ONLY a JSON array, no other text:
 
   private printPlan(plan: TaskPlan): void {
     console.log(chalk.magenta(`\n  🎯 ${plan.goal}`));
+    if (plan.rationale) {
+      console.log(chalk.gray(`  🧠 ${plan.rationale.slice(0, 200)}${plan.rationale.length > 200 ? "..." : ""}`));
+    }
     console.log(chalk.magenta(`  📦 ${plan.subtasks.length} subtask(s)\n`));
+
+    // Build a dependency tree visualization
+    const allIds = new Set(plan.subtasks.map((s) => s.id));
     for (const st of plan.subtasks) {
-      const deps = st.dependencies.length > 0 ? chalk.gray(` → after ${st.dependencies.join(", ")}`) : "";
-      console.log(chalk.magenta(`  ┌─ ${chalk.bold(st.id)}: ${st.title}${deps}`));
+      const deps = st.dependencies.length > 0 ? chalk.gray(` → after ${st.dependencies.join(", ")}`) : chalk.gray(" → no deps");
+      const comp = st.estimatedComplexity ? chalk.dim(` [${st.estimatedComplexity}]`) : "";
+      const files = st.filesExpected ? chalk.dim(` 📄 ${st.filesExpected.join(", ")}`) : "";
+      console.log(chalk.magenta(`  ┌─ ${chalk.bold(st.id)}: ${st.title}${deps}${comp}`));
       const desc = st.description.length > 100 ? st.description.slice(0, 100) + "..." : st.description;
       console.log(chalk.magenta(`  └─ ${chalk.dim(desc)}`));
+      if (files) console.log(chalk.magenta(`     ${files}`));
       console.log();
     }
   }
