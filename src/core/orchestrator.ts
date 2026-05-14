@@ -56,6 +56,7 @@ function createReviewerTools(sandbox: Sandbox): ToolRegistry {
   r.register(createReadFileTool(sandbox));
   r.register(createListFilesTool(sandbox));
   r.register(createRunCommandTool(sandbox));
+  r.register(createWriteFileTool(sandbox));
   return r;
 }
 
@@ -110,24 +111,27 @@ Only declare the task complete after the self-review passes.
 const REVIEWER_TOOLS_PROMPT = `
 
 ## Your Tools
-You have read-only tools: list_files, read_file, run_command.
-You may NOT write or edit files.
+You have these tools: list_files, read_file, write_file, run_command.
 
 ## Review Protocol
 1. INSPECT: Read all modified and relevant files. Run any existing tests or the code itself.
-2. EVALUATE against this checklist:
+2. WRITE INDEPENDENT TEST: Create your OWN test / verification script to prove the subtask works correctly. Do NOT rely on tests written by the coder — write a fresh one that exercises the behavior from a different angle.
+   - Write the test script to a file. Use a unique filename so it does not collide with the other reviewer (e.g., .swarm-review-reviewer{N}-<subtask-id>.test.ts).
+   - The test must exercise actual behavior: call functions, check outputs, assert edge cases.
+   - Use run_command to execute your test script.
+3. EVALUATE against this checklist:
    - CORRECTNESS: Does the code do what the task requires? Are there logic bugs or off-by-one errors?
    - SECURITY: Are there injection risks, unsafe inputs, or leaked secrets?
    - PERFORMANCE: Any obvious inefficiencies, N+1 queries, or unnecessary complexity?
-   - TESTS: Are there tests? Do they pass? If not, what evidence proves the code works?
+   - TESTS: Did YOUR independent test pass? If it failed, report exactly what failed.
    - STYLE: Is the code clean, consistent with the existing codebase, and well-documented?
    - EDGE CASES: Are errors and boundary conditions handled?
-3. FEEDBACK: Provide specific, actionable feedback with file names and line references where applicable.
+4. FEEDBACK: Provide specific, actionable feedback with file names and line references where applicable.
 
 ## Status
 End your review with EXACTLY one line:
-[STATUS: APPROVED] — if all checklist items pass
-[STATUS: NEEDS_WORK] — if any item fails, with specific required fixes listed above`;
+[STATUS: APPROVED] — if all checklist items pass AND your independent test passed
+[STATUS: NEEDS_WORK] — if any item fails, or your test failed, with specific required fixes listed above`;
 
 
 // ── Semaphore for concurrency control ─────────────────────────
@@ -531,36 +535,18 @@ export class Orchestrator {
         iteration++;
       }
 
-      // ── Verification gate ──────────────────────────────────
+      // ── Verification gate (FYI — reviewers already tested independently) ──
       if (subtask.verification) {
-        console.log(chalk.blue(`  │ 🧪 Verification: ${subtask.verification}`));
+        console.log(chalk.blue(`  │ 🧪 Architect verification: ${subtask.verification}`));
         const verifier = createRunCommandTool(this.sandbox);
-        let vAttempts = 0;
-        const maxVAttempts = 2;
+        const vResult = await verifier.execute({ command: subtask.verification, timeout: 60 });
+        const vFailed = vResult.includes("EXIT CODE:") && !vResult.includes("EXIT CODE: 0");
 
-        while (vAttempts < maxVAttempts) {
-          vAttempts++;
-          const vResult = await verifier.execute({ command: subtask.verification, timeout: 60 });
-          const vFailed = vResult.includes("EXIT CODE:") && !vResult.includes("EXIT CODE: 0");
-
-          if (!vFailed) {
-            console.log(chalk.green(`  │ ✅ Verification passed`));
-            break;
-          }
-
-          console.log(chalk.red(`  │ ❌ Verification failed (attempt ${vAttempts}/${maxVAttempts})`));
-          if (vAttempts < maxVAttempts) {
-            const vFix = await coder.continueChat(
-              `The verification command failed. Please fix the code so the following command succeeds:\n\n${subtask.verification}\n\nOutput:\n${vResult}`
-            );
-            allResults.push({
-              taskId: `coder:${subtask.id}:verify-fix-${vAttempts}`,
-              agentRole: `coder:${subtask.id}`,
-              output: vFix.output,
-              tokenUsage: vFix.tokenUsage,
-              duration: 0,
-            });
-          }
+        if (!vFailed) {
+          console.log(chalk.green(`  │ ✅ Verification passed`));
+        } else {
+          console.log(chalk.yellow(`  │ ⚠ Verification failed (reviewers already approved with independent tests)`));
+          console.log(chalk.gray(`  │ ${vResult.slice(0, 200)}...`));
         }
       }
 
@@ -719,7 +705,7 @@ Respond with ONLY a JSON object, no other text:
       description: subtask.description,
       messages: [{
         role: "user",
-        content: `Task: ${subtask.description}\n\nCode has been written. Use tools to read files and inspect the code, then review it.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if code is good\n[STATUS: NEEDS_WORK] — if it needs improvements`,
+        content: `Task: ${subtask.description}\n\nCode has been written. You are Reviewer ${reviewerIndex}.\n\nUse tools to read files, inspect the code, WRITE YOUR OWN INDEPENDENT TEST SCRIPT, run it, and review the results.\n\n- Write your test to a unique file (e.g. .swarm-review-reviewer${reviewerIndex}-${subtask.id}.test.ts or similar) so it does not conflict with the other reviewer.\n- Run your test with run_command.\n- Report whether your test passed or failed.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if all checklist items pass AND your independent test passed\n[STATUS: NEEDS_WORK] — if any item fails or your test failed`,
       }],
     });
   }
