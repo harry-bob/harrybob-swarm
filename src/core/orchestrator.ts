@@ -79,7 +79,7 @@ const CODER_TOOLS_PROMPT = `
 You have these tools: list_files, read_file, write_file, edit_file, run_command, web_search.
 
 ## Core Rules
-- You MUST use tools to complete the task. Do NOT just describe what you would do — actually create files, run commands, and verify your work.
+- You MUST use tools to complete the task. Do NOT just describe what you would do - actually create files, run commands, and verify your work.
 - You are NOT done until you have created/modified files AND run verification commands to prove the code works.
 - A response without tool calls is not acceptable.
 - All file operations are restricted to the project directory.
@@ -91,19 +91,19 @@ You have these tools: list_files, read_file, write_file, edit_file, run_command,
 4. EDGE CASES: Handle errors, null inputs, and boundary conditions explicitly.
 
 ## Tool Usage
-- write_file — create new files with complete content
-- edit_file — modify existing files (oldText must match exactly)
-- read_file — read code before editing
-- run_command — test/build/run code (default 30s timeout, pass timeout param for longer)
-- web_search — look up documentation or error solutions
-- list_files — explore project structure
+- write_file - create new files with complete content
+- edit_file - modify existing files (oldText must match exactly)
+- read_file - read code before editing
+- run_command - test/build/run code (default 30s timeout, pass timeout param for longer)
+- web_search - look up documentation or error solutions
+- list_files - explore project structure
 
 ## Completion Criteria
 Before finishing, you MUST run a SELF-REVIEW:
-1. Read back any files you created or modified — do they match your intent?
+1. Read back any files you created or modified - do they match your intent?
 2. Check for bugs: off-by-one errors, null references, unhandled promises, missing imports
 3. Check edge cases: empty inputs, invalid data, error paths
-4. Verify tests/build/commands pass — if none exist, write a minimal verification script
+4. Verify tests/build/commands pass - if none exist, write a minimal verification script
 5. Ensure no TODOs, placeholders, or dead code remain
 
 Only declare the task complete after the self-review passes.
@@ -116,10 +116,10 @@ You have these tools: list_files, read_file, write_file, run_command, do_test.
 
 ## Review Protocol
 1. INSPECT: Read all modified and relevant files.
-2. WRITE INDEPENDENT TEST: Use **do_test(code)** to create and run your OWN test / verification script. Do NOT rely on tests written by the coder — write a fresh one that exercises the behavior from a different angle.
+2. WRITE INDEPENDENT TEST: Use **do_test(code)** to create and run your OWN test / verification script. Do NOT rely on tests written by the coder - write a fresh one that exercises the behavior from a different angle.
    - Pass the complete test code to do_test. It will be saved to test/{taskId}/reviewer{index}/ and executed automatically.
    - The test must exercise actual behavior: call functions, check outputs, assert edge cases.
-   - Include the testing framework and assertions directly in your code — do not assume external test runners like jest or pytest are installed. Use built-in asserts (Node assert, Python assert, console.assert, etc.).
+   - Include the testing framework and assertions directly in your code - do not assume external test runners like jest or pytest are installed. Use built-in asserts (Node assert, Python assert, console.assert, etc.).
    - The execution result is returned to you. Report whether it passed or failed.
    - If you need to create auxiliary files (test data, mocks), use write_file.
 3. EVALUATE against this checklist:
@@ -131,38 +131,26 @@ You have these tools: list_files, read_file, write_file, run_command, do_test.
    - EDGE CASES: Are errors and boundary conditions handled?
 4. FEEDBACK: Provide specific, actionable feedback with file names and line references where applicable.
 
+## Report to Orchestrator
+Before your status line, write a brief structured report for the orchestrator about what this subtask accomplished and whether remaining work should change:
+- FILES_CHECKED: which files you inspected
+- TEST_APPROACH: what behavior your independent test exercised
+- KEY_FINDINGS: correctness issues, bugs, or gaps noted
+- IMPACT_ON_PLAN: whether completed work suggests changes to remaining subtasks (new dependencies, missing tests, scope creep, etc.)
+
+Format exactly:
+[REPORT]
+FILES_CHECKED: ...
+TEST_APPROACH: ...
+KEY_FINDINGS: ...
+IMPACT_ON_PLAN: ...
+[/REPORT]
+
 ## Status
 End your review with EXACTLY one line:
-[STATUS: APPROVED] — if all checklist items pass AND your independent test passed
-[STATUS: NEEDS_WORK] — if any item fails, or your test failed, with specific required fixes listed above`;
+[STATUS: APPROVED] - if all checklist items pass AND your independent test passed
+[STATUS: NEEDS_WORK] - if any item fails, or your test failed, with specific required fixes listed above`;
 
-
-// ── Semaphore for concurrency control ─────────────────────────
-
-class Semaphore {
-  private waiting: (() => void)[] = [];
-  private count: number;
-
-  constructor(max: number) {
-    this.count = max;
-  }
-
-  async acquire(): Promise<void> {
-    if (this.count > 0) {
-      this.count--;
-      return;
-    }
-    return new Promise((resolve) => this.waiting.push(resolve));
-  }
-
-  release(): void {
-    if (this.waiting.length > 0) {
-      this.waiting.shift()!();
-    } else {
-      this.count++;
-    }
-  }
-}
 
 // ── UI helpers ────────────────────────────────────────────────
 
@@ -296,13 +284,12 @@ export class Orchestrator {
     };
   }
 
-  // ── Pipeline Execution ────────────────────────────────────
+  // ── Pipeline Execution (sequential) ─────────────────────
 
   /**
-   * Pipeline architecture: coders and reviewers run independently.
-   * When a coder finishes, it immediately frees its slot for the next task.
-   * The reviewer runs concurrently with the next coder.
-   * Re-planning happens after each subtask completes.
+   * Sequential execution: one subtask at a time, fully completing each
+   * (coder → reviewer 1 → replan → reviewer 2 → replan → consensus → next)
+   * before moving to the next ready subtask.
    */
   private async executePipeline(
     taskDescription: string,
@@ -313,11 +300,6 @@ export class Orchestrator {
     const results: Record<string, AgentResult[]> = {};
     const completed = new Set<string>();
     const failed = new Set<string>();
-    const inProgress = new Set<string>();
-    const semaphore = new Semaphore(this.config.orchestration.maxConcurrentAgents);
-    const activePromises: Promise<void>[] = [];
-
-    // Track review rounds per subtask (max 3)
     const reviewRounds = new Map<string, number>();
 
     const getReady = (): Subtask[] =>
@@ -325,66 +307,52 @@ export class Orchestrator {
         (st) =>
           !completed.has(st.id) &&
           !failed.has(st.id) &&
-          !inProgress.has(st.id) &&
           st.dependencies.every((dep) => completed.has(dep)) &&
           !st.dependencies.some((dep) => failed.has(dep))
       );
 
-    // Seed initial ready tasks
-    const spawnReady = () => {
+    while (completed.size + failed.size < plan.subtasks.length) {
       const ready = getReady();
+      if (ready.length === 0) break;
+
       for (const subtask of ready) {
-        inProgress.add(subtask.id);
-        const p = this.processSubtaskPipeline(
-          subtask,
-          plan,
-          results,
-          completed,
-          failed,
-          inProgress,
-          semaphore,
-          reviewRounds,
-          taskDescription,
-          architect,
-          architectTools,
-          spawnReady
-        ).finally(() => {
-          // Auto-remove from active list when this subtask finishes
-          const idx = activePromises.indexOf(p);
-          if (idx !== -1) activePromises.splice(idx, 1);
-        });
-        activePromises.push(p);
+        try {
+          await this.processSubtask(
+            subtask,
+            plan,
+            results,
+            completed,
+            failed,
+            reviewRounds,
+            taskDescription,
+            architect,
+            architectTools
+          );
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          console.log(chalk.red(`  ❌ [${subtask.id}] unhandled pipeline error: ${msg}`));
+          failed.add(subtask.id);
+        }
       }
-    };
-
-    spawnReady();
-
-    // Wait for all work to complete
-    while (activePromises.length > 0) {
-      await Promise.race(activePromises).catch(() => {});
     }
 
     return results;
   }
 
   /**
-   * Process a single subtask through the coder→reviewer pipeline.
-   * Uses conversation continuity — coder keeps its full history across review loops.
-   * When done, calls spawnNew() to check for newly ready subtasks.
+   * Process a single subtask: coder → sequential reviewers → consensus → next subtask.
+   * After each reviewer finishes, the orchestrator adjusts the plan based on the reviewer's report.
    */
-  private async processSubtaskPipeline(
+  private async processSubtask(
     subtask: Subtask,
     plan: TaskPlan,
     results: Record<string, AgentResult[]>,
     completed: Set<string>,
     failed: Set<string>,
-    inProgress: Set<string>,
-    semaphore: Semaphore,
     reviewRounds: Map<string, number>,
     taskDescription: string,
     architect: ArchitectAgent,
-    architectTools: ToolRegistry,
-    spawnNew: () => void
+    architectTools: ToolRegistry
   ): Promise<void> {
     const cache = new FileCache();
     const coderConfig = this.config.agents.coder;
@@ -401,186 +369,152 @@ export class Orchestrator {
 
     const allResults: AgentResult[] = [];
 
-    try {
-      await semaphore.acquire();
+    console.log(chalk.blue(`\n  ├─── ${subtask.title} ───`));
 
-      console.log(chalk.blue(`\n  ┌─── ${subtask.title} ───`));
+    // ── Create coder with conversation continuity ──────────
+    const coder = new LLMAgent(
+      {
+        role: `coder:${subtask.id}`,
+        systemPrompt: coderConfig.systemPrompt + CODER_TOOLS_PROMPT,
+      },
+      this.config.model,
+      this.provider,
+      createCoderTools(this.sandbox, this.config, cache)
+    );
 
-      // ── Create coder with conversation continuity ──────────
-      const coder = new LLMAgent(
-        {
-          role: `coder:${subtask.id}`,
-          systemPrompt: coderConfig.systemPrompt + CODER_TOOLS_PROMPT,
-        },
-        this.config.model,
-        this.provider,
-        createCoderTools(this.sandbox, this.config, cache)
+    // Start coder conversation
+    const ctx = depContext ? `\n\nContext from prior subtasks:\n${depContext}` : "";
+    const fileHints = subtask.filesExpected
+      ? `\n\nFiles you are expected to create or modify: ${subtask.filesExpected.join(", ")}`
+      : "";
+    const complexityHint = subtask.estimatedComplexity
+      ? `\nEstimated complexity: ${subtask.estimatedComplexity}`
+      : "";
+
+    coder.startTask({
+      id: `task-${subtask.id}-coder`,
+      description: subtask.description,
+      messages: [{ role: "user", content: `Task: ${subtask.description}${ctx}${fileHints}${complexityHint}\n\nBegin implementing the task now. Use your tools.` }],
+    });
+
+    // ── First coder pass ───────────────────────────────────
+    console.log(chalk.blue(`  │ 🛠  Coder`));
+    const firstResult = await coder.continueChat("");
+    allResults.push({
+      taskId: `coder:${subtask.id}:0`,
+      agentRole: `coder:${subtask.id}`,
+      output: firstResult.output,
+      tokenUsage: firstResult.tokenUsage,
+      duration: 0,
+    });
+
+    // Stubborn retry: coder must actually modify files
+    let stubbornRetries = 0;
+    while (!coder.hasModifiedFiles() && stubbornRetries < 5) {
+      stubbornRetries++;
+      console.log(chalk.yellow(`  │ ⚠ No files modified — stubborn retry ${stubbornRetries}/5`));
+      const stubbornResult = await coder.continueChat(
+        `IMPORTANT: You have not yet created or modified any files. You MUST use write_file, edit_file, or run_command to implement this task. Empty responses are not acceptable. Please implement the task now.`
       );
-
-      // Start coder conversation
-      const ctx = depContext ? `\n\nContext from prior subtasks:\n${depContext}` : "";
-      const fileHints = subtask.filesExpected
-        ? `\n\nFiles you are expected to create or modify: ${subtask.filesExpected.join(", ")}`
-        : "";
-      const complexityHint = subtask.estimatedComplexity
-        ? `\nEstimated complexity: ${subtask.estimatedComplexity}`
-        : "";
-
-      coder.startTask({
-        id: `task-${subtask.id}-coder`,
-        description: subtask.description,
-        messages: [{ role: "user", content: `Task: ${subtask.description}${ctx}${fileHints}${complexityHint}\n\nBegin implementing the task now. Use your tools.` }],
-      });
-
-      // First coder pass
-      console.log(chalk.blue(`  │ 🛠  Coder`));
-      let iteration = 0;
-
-      // Use continueChat with empty string since startTask already added the message
-      const coderResult = await coder.continueChat("");
-
       allResults.push({
-        taskId: `coder:${subtask.id}:${iteration}`,
+        taskId: `coder:${subtask.id}:stubborn-${stubbornRetries}`,
         agentRole: `coder:${subtask.id}`,
-        output: coderResult.output,
-        tokenUsage: coderResult.tokenUsage,
+        output: stubbornResult.output,
+        tokenUsage: stubbornResult.tokenUsage,
         duration: 0,
       });
-      iteration++;
+    }
 
-      // ── Stubborn retry: coder must actually modify files ─────
-      let stubbornRetries = 0;
-      while (!coder.hasModifiedFiles() && stubbornRetries < 5) {
-        stubbornRetries++;
-        console.log(chalk.yellow(`  │ ⚠ No files modified — stubborn retry ${stubbornRetries}/5`));
-        const stubbornResult = await coder.continueChat(
-          `IMPORTANT: You have not yet created or modified any files. You MUST use write_file, edit_file, or run_command to implement this task. Empty responses are not acceptable. Please implement the task now.`
-        );
-        allResults.push({
-          taskId: `coder:${subtask.id}:stubborn-${stubbornRetries}`,
-          agentRole: `coder:${subtask.id}`,
-          output: stubbornResult.output,
-          tokenUsage: stubbornResult.tokenUsage,
-          duration: 0,
+    // ── Reviewer consensus loop ──────────────────────────
+    let reviewRound = 0;
+    let modifiedFiles = coder.getModifiedFiles();
+    let coderSummary = allResults[allResults.length - 1]?.output || "";
+
+    while (reviewRound <= this.maxReviewerRounds) {
+      console.log(chalk.blue(`  │ 🔍 Reviewers (round ${reviewRound})`));
+
+      // Reviewer 1
+      const reviewA = await this.runReviewer(subtask, reviewRound, 1, modifiedFiles, coderSummary);
+      allResults.push(reviewA);
+      const reportA = this.extractReviewerReport(reviewA.output);
+      if (reportA && completed.size < plan.subtasks.length) {
+        await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools, {
+          report: reportA,
+          source: `Reviewer 1 for ${subtask.id}`,
+          reviewStatus: reviewA.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
         });
       }
 
-      // Extract what the coder actually changed
-      const modifiedFiles = coder.getModifiedFiles();
-      const lastCoderResult = allResults[allResults.length - 1] || { output: "" };
-      const coderSummary = lastCoderResult.output;
-
-      // ── Reviewer consensus loop ────────────────────────────
-      const maxRounds = this.maxReviewerRounds;
-
-      while (iteration <= maxRounds) {
-        // Release semaphore during review so other tasks can code
-        semaphore.release();
-
-        console.log(chalk.blue(`  │ 🔍 Reviewers (round ${iteration})`));
-
-        // Run 2 reviewers in parallel for consensus
-        const settled = await Promise.allSettled([
-          this.runReviewer(subtask, iteration, 1, modifiedFiles, coderSummary),
-          this.runReviewer(subtask, iteration, 2, modifiedFiles, coderSummary),
-        ]);
-
-        const reviewA: AgentResult = settled[0].status === "fulfilled"
-          ? settled[0].value
-          : {
-              taskId: `task-${subtask.id}-reviewer-${iteration}-1`,
-              agentRole: `reviewer:${subtask.id}-1`,
-              output: `[STATUS: NEEDS_WORK]\nReviewer 1 failed: ${settled[0].reason}`,
-              tokenUsage: { prompt: 0, completion: 0 },
-              duration: 0,
-            };
-
-        const reviewB: AgentResult = settled[1].status === "fulfilled"
-          ? settled[1].value
-          : {
-              taskId: `task-${subtask.id}-reviewer-${iteration}-2`,
-              agentRole: `reviewer:${subtask.id}-2`,
-              output: `[STATUS: NEEDS_WORK]\nReviewer 2 failed: ${settled[1].reason}`,
-              tokenUsage: { prompt: 0, completion: 0 },
-              duration: 0,
-            };
-
-        allResults.push(reviewA, reviewB);
-
-        const approvedA = reviewA.output.includes("[STATUS: APPROVED]");
-        const approvedB = reviewB.output.includes("[STATUS: APPROVED]");
-        const consensus = approvedA && approvedB;
-
-        // Re-acquire for next phase
-        await semaphore.acquire();
-
-        if (consensus) {
-          console.log(chalk.green(`  └─ ✅ Approved by consensus (2/2)`));
-          break;
-        }
-
-        if (iteration >= maxRounds) {
-          console.log(chalk.yellow(`  └─ ⏰ Max review rounds reached — accepting without consensus`));
-          break;
-        }
-
-        // ── NEEDS_WORK — continue coder conversation ─────────
-        console.log(chalk.yellow(`  │ 🔄 Needs work — sending feedback to coder`));
-        reviewRounds.set(subtask.id, (reviewRounds.get(subtask.id) || 0) + 1);
-
-        console.log(chalk.blue(`  │ 🛠  Coder (round ${iteration + 1})`));
-
-        const feedback = this.buildConsensusFeedback(reviewA, reviewB, approvedA, approvedB);
-        const coderFixResult = await coder.continueChat(feedback);
-
-        allResults.push({
-          taskId: `coder:${subtask.id}:${iteration}`,
-          agentRole: `coder:${subtask.id}`,
-          output: coderFixResult.output,
-          tokenUsage: coderFixResult.tokenUsage,
-          duration: 0,
+      // Reviewer 2
+      const reviewB = await this.runReviewer(subtask, reviewRound, 2, modifiedFiles, coderSummary);
+      allResults.push(reviewB);
+      const reportB = this.extractReviewerReport(reviewB.output);
+      if (reportB && completed.size < plan.subtasks.length) {
+        await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools, {
+          report: reportB,
+          source: `Reviewer 2 for ${subtask.id}`,
+          reviewStatus: reviewB.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
         });
-        iteration++;
       }
 
-      // ── Verification gate (FYI — reviewers already tested independently) ──
-      if (subtask.verification) {
-        console.log(chalk.blue(`  │ 🧪 Architect verification: ${subtask.verification}`));
-        const verifier = createRunCommandTool(this.sandbox);
-        const vResult = await verifier.execute({ command: subtask.verification, timeout: 60 });
-        const vFailed = vResult.includes("EXIT CODE:") && !vResult.includes("EXIT CODE: 0");
+      const approvedA = reviewA.output.includes("[STATUS: APPROVED]");
+      const approvedB = reviewB.output.includes("[STATUS: APPROVED]");
+      const consensus = approvedA && approvedB;
 
-        if (!vFailed) {
-          console.log(chalk.green(`  │ ✅ Verification passed`));
-        } else {
-          console.log(chalk.yellow(`  │ ⚠ Verification failed (reviewers already approved with independent tests)`));
-          console.log(chalk.gray(`  │ ${vResult.slice(0, 200)}...`));
-        }
+      if (consensus) {
+        console.log(chalk.green(`  │ ✅ Approved by consensus (2/2)`));
+        break;
       }
 
-      // Mark done
-      results[subtask.id] = allResults;
-      completed.add(subtask.id);
-      inProgress.delete(subtask.id);
-
-      // Release semaphore
-      semaphore.release();
-
-      // ── Re-plan: ask architect if remaining plan needs adjustment ──
-      if (completed.size < plan.subtasks.length) {
-        await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools);
-        // Spawn newly ready subtasks (including any re-planned ones)
-        spawnNew();
+      if (reviewRound >= this.maxReviewerRounds) {
+        console.log(chalk.yellow(`  │ ⏰ Max review rounds reached — accepting without consensus`));
+        break;
       }
 
-    } catch (err: unknown) {
-      semaphore.release();
-      inProgress.delete(subtask.id);
-      failed.add(subtask.id);
-      const msg = err instanceof Error ? err.message : String(err);
-      console.log(chalk.red(`  ❌ [${subtask.id}] failed: ${msg}`));
-      // Still spawn new tasks in case some don't depend on this
-      spawnNew();
+      // ── NEEDS_WORK — continue coder conversation ─────────
+      console.log(chalk.yellow(`  │ 🔄 Needs work — sending feedback to coder`));
+      reviewRounds.set(subtask.id, (reviewRounds.get(subtask.id) || 0) + 1);
+      console.log(chalk.blue(`  │ 🛠  Coder (fix round ${reviewRound + 1})`));
+
+      const feedback = this.buildConsensusFeedback(reviewA, reviewB, approvedA, approvedB);
+      const fixResult = await coder.continueChat(feedback);
+
+      allResults.push({
+        taskId: `coder:${subtask.id}:fix-${reviewRound}`,
+        agentRole: `coder:${subtask.id}`,
+        output: fixResult.output,
+        tokenUsage: fixResult.tokenUsage,
+        duration: 0,
+      });
+
+      // Refresh state for next review round
+      modifiedFiles = coder.getModifiedFiles();
+      coderSummary = fixResult.output;
+      reviewRound++;
+    }
+
+    // ── Verification gate (FYI) ────────────────────────────
+    if (subtask.verification) {
+      console.log(chalk.blue(`  │ 🧪 Architect verification: ${subtask.verification}`));
+      const verifier = createRunCommandTool(this.sandbox);
+      const vResult = await verifier.execute({ command: subtask.verification, timeout: 60 });
+      const vFailed = vResult.includes("EXIT CODE:") && !vResult.includes("EXIT CODE: 0");
+
+      if (!vFailed) {
+        console.log(chalk.green(`  │ ✅ Verification passed`));
+      } else {
+        console.log(chalk.yellow(`  │ ⚠ Verification failed (reviewers already approved with independent tests)`));
+        console.log(chalk.gray(`  │ ${vResult.slice(0, 200)}...`));
+      }
+    }
+
+    // Mark done
+    results[subtask.id] = allResults;
+    completed.add(subtask.id);
+
+    // Final replan after subtask completion
+    if (completed.size < plan.subtasks.length) {
+      await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools);
     }
   }
 
@@ -596,7 +530,8 @@ export class Orchestrator {
     completed: Set<string>,
     results: Record<string, AgentResult[]>,
     architect: ArchitectAgent,
-    architectTools: ToolRegistry
+    architectTools: ToolRegistry,
+    reviewerFeedback?: { report: string; source: string; reviewStatus: string }
   ): Promise<void> {
     const remaining = plan.subtasks.filter((s) => !completed.has(s.id));
     if (remaining.length === 0) return;
@@ -612,9 +547,13 @@ export class Orchestrator {
       })
       .join("\n");
 
-    const remainingSummary = remaining.map((s) => `- ${s.id}: ${s.title} — ${s.description.slice(0, 100)}`).join("\n");
+    const remainingSummary = remaining.map((s) => `- ${s.id}: ${s.title} - ${s.description.slice(0, 100)}`).join("\n");
 
-    // Ask architect (using a quick tool call — not a full planning pass)
+    const feedbackBlock = reviewerFeedback
+      ? `REVIEWER FEEDBACK:\nSource: ${reviewerFeedback.source}\nStatus: ${reviewerFeedback.reviewStatus}\nReport:\n${reviewerFeedback.report}\n`
+      : "";
+
+    // Ask architect (using a quick tool call - not a full planning pass)
     const replanPrompt = `You planned the following task:
 
 Goal: ${plan.goal}
@@ -622,10 +561,11 @@ Goal: ${plan.goal}
 COMPLETED subtasks:
 ${completedSummary}
 
+${feedbackBlock}
 REMAINING subtasks:
 ${remainingSummary}
 
-Based on what was completed, do the remaining subtasks need changes? 
+Based on completed work and any reviewer feedback above, do the remaining subtasks need changes?
 If the remaining plan is fine as-is, respond with "NO CHANGES".
 If changes are needed, describe what subtasks to add, modify, or remove. Be specific about which subtask IDs to change.`;
 
@@ -636,7 +576,7 @@ If changes are needed, describe what subtasks to add, modify, or remove. Be spec
         return;
       }
 
-      // Parse changes (simple heuristic — look for add/remove/modify instructions)
+      // Parse changes (simple heuristic - look for add/remove/modify instructions)
       console.log(chalk.magenta(`\n  🔄 Architect adjusting plan...`));
 
       // Ask architect to provide updated remaining subtasks as full JSON
@@ -682,15 +622,23 @@ Respond with ONLY a JSON object, no other text:
             console.log(chalk.magenta(`     └─ ${s.id}: ${s.title}${files}`));
           }
         } catch {
-          console.log(chalk.gray(`  ⏭  Could not parse updated plan — keeping original`));
+          console.log(chalk.gray(`  ⏭  Could not parse updated plan - keeping original`));
         }
       }
     } catch {
-      // Re-planning is best-effort — don't fail the whole run
+      // Re-planning is best-effort - don't fail the whole run
     }
   }
 
   // ── Reviewer helpers ───────────────────────────────────────
+
+  /**
+   * Extract the structured [REPORT] block from a reviewer's output.
+   */
+  private extractReviewerReport(output: string): string | null {
+    const match = output.match(/\[REPORT\]([\s\S]*?)\[\/REPORT\]/);
+    return match ? match[1].trim() : null;
+  }
 
   private async runReviewer(
     subtask: Subtask,
@@ -712,7 +660,7 @@ Respond with ONLY a JSON object, no other text:
 
     const filesList = modifiedFiles.length > 0
       ? `Files modified by the coder:\n${modifiedFiles.map((f) => `  • ${f}`).join("\n")}`
-      : "(The coder did not report any modified files — inspect the codebase to find what was changed.)";
+      : "(The coder did not report any modified files - inspect the codebase to find what was changed.)";
 
     const summaryBlock = coderSummary
       ? `Coder's summary of changes:\n---\n${coderSummary.slice(0, 1200)}\n---\n`
@@ -723,7 +671,7 @@ Respond with ONLY a JSON object, no other text:
       description: subtask.description,
       messages: [{
         role: "user",
-        content: `Task: ${subtask.description}\n\n${filesList}\n\n${summaryBlock}\n\nReview the code. Read the files listed above, then use **do_test** to write and execute your OWN independent test script.\n\n- do_test(code) saves your test to test/${subtask.id}/reviewer${reviewerIndex}/ and runs it automatically.\n- Include assertions directly in your code. Use built-in assert (Node: require('assert'), Python: assert, etc.).\n- The execution result is returned to you. Report whether your test passed or failed.\n- If you need auxiliary files (test data, mocks), use write_file.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if all checklist items pass AND your independent test passed\n[STATUS: NEEDS_WORK] — if any item fails or your test failed`,
+        content: `Task: ${subtask.description}\n\n${filesList}\n\n${summaryBlock}\n\nReview the code. Read the files listed above, then use **do_test** to write and execute your OWN independent test script.\n\n- do_test(code) saves your test to test/${subtask.id}/reviewer${reviewerIndex}/ and runs it automatically.\n- Include assertions directly in your code. Use built-in assert (Node: require('assert'), Python: assert, etc.).\n- The execution result is returned to you. Report whether your test passed or failed.\n- If you need auxiliary files (test data, mocks), use write_file.\n\nEnd with exactly one line:\n[STATUS: APPROVED] - if all checklist items pass AND your independent test passed\n[STATUS: NEEDS_WORK] - if any item fails or your test failed`,
       }],
     });
   }
