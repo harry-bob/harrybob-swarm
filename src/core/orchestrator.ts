@@ -3,7 +3,7 @@ import { AgentResult } from "../agents/base.js";
 import { ArchitectAgent } from "./architect.js";
 import { TaskPlan, Subtask } from "./types.js";
 import { createProvider } from "../providers/factory.js";
-import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool, createReviewerTestTool } from "../tools/index.js";
+import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool, createReviewerTestTool, createReviewerReturnTool } from "../tools/index.js";
 import { saveSession } from "./session.js";
 import { withTimeout } from "../utils/timeout.js";
 import chalk from "chalk";
@@ -58,6 +58,7 @@ function createReviewerTools(sandbox: Sandbox, taskId: string, reviewerIndex: nu
   r.register(createRunCommandTool(sandbox));
   r.register(createWriteFileTool(sandbox));
   r.register(createReviewerTestTool(sandbox, taskId, reviewerIndex));
+  r.register(createReviewerReturnTool());
   return r;
 }
 
@@ -112,14 +113,14 @@ Only declare the task complete after the self-review passes.
 const REVIEWER_TOOLS_PROMPT = `
 
 ## Your Tools
-You have these tools: list_files, read_file, write_file, run_command, do_test.
+You have these tools: list_files, read_file, write_file, run_command, do_test, return_review.
 
 ## Review Protocol
 1. INSPECT: Read all modified and relevant files.
-2. WRITE INDEPENDENT TEST: Use **do_test(code)** to create and run your OWN test / verification script. Do NOT rely on tests written by the coder - write a fresh one that exercises the behavior from a different angle.
+2. WRITE INDEPENDENT TEST: Use **do_test(code)** to create and run your OWN test / verification script. Do NOT rely on tests written by the coder — write a fresh one that exercises the behavior from a different angle.
    - Pass the complete test code to do_test. It will be saved to test/{taskId}/reviewer{index}/ and executed automatically.
    - The test must exercise actual behavior: call functions, check outputs, assert edge cases.
-   - Include the testing framework and assertions directly in your code - do not assume external test runners like jest or pytest are installed. Use built-in asserts (Node assert, Python assert, console.assert, etc.).
+   - Include the testing framework and assertions directly in your code — do not assume external test runners like jest or pytest are installed. Use built-in asserts (Node assert, Python assert, console.assert, etc.).
    - The execution result is returned to you. Report whether it passed or failed.
    - If you need to create auxiliary files (test data, mocks), use write_file.
 3. EVALUATE against this checklist:
@@ -131,25 +132,14 @@ You have these tools: list_files, read_file, write_file, run_command, do_test.
    - EDGE CASES: Are errors and boundary conditions handled?
 4. FEEDBACK: Provide specific, actionable feedback with file names and line references where applicable.
 
-## Report to Orchestrator
-Before your status line, write a brief structured report for the orchestrator about what this subtask accomplished and whether remaining work should change:
-- FILES_CHECKED: which files you inspected
-- TEST_APPROACH: what behavior your independent test exercised
-- KEY_FINDINGS: correctness issues, bugs, or gaps noted
-- IMPACT_ON_PLAN: whether completed work suggests changes to remaining subtasks (new dependencies, missing tests, scope creep, etc.)
-
-Format exactly:
-[REPORT]
-FILES_CHECKED: ...
-TEST_APPROACH: ...
-KEY_FINDINGS: ...
-IMPACT_ON_PLAN: ...
-[/REPORT]
-
-## Status
-End your review with EXACTLY one line:
-[STATUS: APPROVED] - if all checklist items pass AND your independent test passed
-[STATUS: NEEDS_WORK] - if any item fails, or your test failed, with specific required fixes listed above`;
+## Final Submission
+Your VERY LAST action MUST be calling **return_review(report, approved)**. Do not output any text after calling it.
+- report: a structured string with these sections:
+  FILES_CHECKED: which files you inspected
+  TEST_APPROACH: what behavior your independent test exercised
+  KEY_FINDINGS: correctness issues, bugs, or gaps noted
+  IMPACT_ON_PLAN: whether completed work suggests changes to remaining subtasks
+- approved: true only if all checklist items pass AND your independent test passed. Otherwise false.`;
 
 
 // ── UI helpers ────────────────────────────────────────────────
@@ -633,7 +623,8 @@ Respond with ONLY a JSON object, no other text:
   // ── Reviewer helpers ───────────────────────────────────────
 
   /**
-   * Extract the structured [REPORT] block from a reviewer's output.
+   * Extract the structured report from a reviewer's output.
+   * Looks for [REPORT]...[REPORT] in the output text.
    */
   private extractReviewerReport(output: string): string | null {
     const match = output.match(/\[REPORT\]([\s\S]*?)\[\/REPORT\]/);
@@ -660,20 +651,35 @@ Respond with ONLY a JSON object, no other text:
 
     const filesList = modifiedFiles.length > 0
       ? `Files modified by the coder:\n${modifiedFiles.map((f) => `  • ${f}`).join("\n")}`
-      : "(The coder did not report any modified files - inspect the codebase to find what was changed.)";
+      : "(The coder did not report any modified files — inspect the codebase to find what was changed.)";
 
     const summaryBlock = coderSummary
       ? `Coder's summary of changes:\n---\n${coderSummary.slice(0, 1200)}\n---\n`
       : "(No summary provided by the coder.)";
 
-    return reviewer.execute({
+    const result = await reviewer.execute({
       id: `task-${subtask.id}-reviewer-${round}-${reviewerIndex}`,
       description: subtask.description,
       messages: [{
         role: "user",
-        content: `Task: ${subtask.description}\n\n${filesList}\n\n${summaryBlock}\n\nReview the code. Read the files listed above, then use **do_test** to write and execute your OWN independent test script.\n\n- do_test(code) saves your test to test/${subtask.id}/reviewer${reviewerIndex}/ and runs it automatically.\n- Include assertions directly in your code. Use built-in assert (Node: require('assert'), Python: assert, etc.).\n- The execution result is returned to you. Report whether your test passed or failed.\n- If you need auxiliary files (test data, mocks), use write_file.\n\nEnd with exactly one line:\n[STATUS: APPROVED] - if all checklist items pass AND your independent test passed\n[STATUS: NEEDS_WORK] - if any item fails or your test failed`,
+        content: `Task: ${subtask.description}\n\n${filesList}\n\n${summaryBlock}\n\nReview the code. Read the files listed above, then use **do_test** to write and execute your OWN independent test script.\n\n- do_test(code) saves your test to test/${subtask.id}/reviewer${reviewerIndex}/ and runs it automatically.\n- Include assertions directly in your code. Use built-in assert (Node: require('assert'), Python: assert, etc.).\n- The execution result is returned to you. Report whether your test passed or failed.\n- If you need auxiliary files (test data, mocks), use write_file.\n\nWhen you are done, call **return_review(report, approved)** as your final action. Do not output any text after calling it.`,
       }],
     });
+
+    // Inspect the reviewer's history for the return_review tool call
+    const history = reviewer.getHistory();
+    const returnCall = history
+      .filter((m) => m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0)
+      .flatMap((m) => m.tool_calls!)
+      .find((tc) => tc.name === "return_review");
+
+    if (returnCall) {
+      const report = (returnCall.arguments.report as string) || "";
+      const approved = !!returnCall.arguments.approved;
+      result.output = `[REPORT]\n${report}\n[/REPORT]\n\n[STATUS: ${approved ? "APPROVED" : "NEEDS_WORK"}]`;
+    }
+
+    return result;
   }
 
   private buildConsensusFeedback(
