@@ -13,44 +13,59 @@ interface Tool {
 }
 ```
 
-## Tool Registry (`registry.ts`)
+## ToolRegistry (`registry.ts`)
 
 ```typescript
 class ToolRegistry {
   register(tool: Tool): void;
   get(name: string): Tool | undefined;
-  getAll(): Tool[];
-  getDefinitions(): ToolDefinition[]; // for LLM
+  has(name: string): boolean;
+  getDefinitions(): ToolDefinition[]; // For LLM function-calling schema
+  execute(name, args): Promise<string>;
 }
 ```
 
 ## Sandbox (`sandbox.ts`)
 
-All file operations are validated against the project root:
+All file-path operations are validated against the project root.
 
 ```
 Sandbox(rootDir)
-  ├─ validatePath(path) → throws if outside root
-  └─ getRoot() → returns root directory
+├─ validate(path) → throws if outside root
+├─ getRoot() → returns root directory
+├─ isAllowed(path) → boolean
+└─ relative(path) → relative path from root
 ```
 
-Path checks:
-- Resolves to absolute path
-- Checks it starts with root dir
-- Blocks `../` traversal
-- Blocks absolute paths outside root
+Security checks:
+- Resolves to absolute path.
+- Verifies prefix match with root directory.
+- Blocks `../` traversal.
+- Blocks absolute paths outside root.
 
-## Tool Availability by Agent
+## Tool Matrix
 
 | Tool | Architect | Coder | Reviewer | Researcher |
-|------|-----------|-------|----------|------------|
-| read_file | ✅ | ✅ | ✅ | ✅ |
-| write_file | ❌ | ✅ | ❌ | ❌ |
-| edit_file | ❌ | ✅ | ❌ | ❌ |
-| list_files | ✅ | ✅ | ✅ | ✅ |
-| run_command | ❌ | ✅ | ✅ | ❌ |
-| web_search | ✅* | ✅* | ❌ | ✅ |
-| research | ✅* | ❌ | ❌ | ❌ |
-| ask_user | ✅* | ❌ | ❌ | ❌ |
+|------|:---------:|:-----:|:--------:|:----------:|
+| `read_file` | ✅ | ✅ | ✅ | ✅ |
+| `write_file` | ❌ | ✅ | ❌ | ❌ |
+| `edit_file` | ❌ | ✅ | ❌ | ❌ |
+| `list_files` | ✅ | ✅ | ✅ | ✅ |
+| `run_command` | ❌ | ✅ | read-only | ❌ |
+| `web_search` | ✅* | ✅* | ❌ | ✅ |
+| `research` | ✅* | ❌ | ❌ | ❌ |
+| `ask_user_question` | ✅* | ❌ | ❌ | ❌ |
 
-`*` = conditional on `disabledTools` config
+\* Disabled when present in `config.disabledTools`.
+
+## Disabling Tools
+
+The `disabledTools` array in `.swarmrc.json` prevents registration entirely:
+
+- `web_search` — blocks internet access
+- `research` — disables the Researcher agent
+- `ask_user_question` — removes interactive prompts (required for headless benchmark runners)
+
+## File Cache (`files.ts`)
+
+A per-subtask cache for `read_file` results, invalidated on `write_file` and `edit_file`.

@@ -207,6 +207,7 @@ swarm/
 │   ├── core/
 │   │   ├── orchestrator.ts    # Pipeline: plan → execute → summary
 │   │   ├── architect.ts       # Architect/planner agent
+│   │   ├── validation.ts      # Zod schema validation for task plans
 │   │   ├── session.ts         # Session persistence
 │   │   └── types.ts           # Core types
 │   ├── config/

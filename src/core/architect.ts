@@ -1,6 +1,7 @@
 import { LLMProvider, ChatMessage } from "../providers/types.js";
 import { ToolRegistry } from "../tools/registry.js";
 import { TaskPlan, Subtask } from "./types.js";
+import { TaskPlanSchema } from "./validation.js";
 import chalk from "chalk";
 
 const ARCHITECT_SYSTEM_PROMPT = `You are the Leader/Architect agent. Your job is to analyze a user's request, investigate the codebase, and break the work into clear, actionable subtasks that coding agents can execute independently.
@@ -24,6 +25,7 @@ You have ONLY these tools:
 - Each subtask must be self-contained with a SPECIFIC description including exact file names, function names, and key requirements.
 - Only add dependencies when truly necessary. Ensure the dependency graph is acyclic.
 - A subtask should be completable by a single coder agent using file tools.
+- Include a "verification" field for each subtask when applicable: a shell command that proves the subtask works (e.g., a test or build command). If no simple command exists, omit it.
 - If the task is simple enough for one agent, return exactly one subtask with no dependencies.
 
 ## Output Format
@@ -35,7 +37,8 @@ You MUST respond with ONLY a valid JSON object — no markdown fences, no preamb
       "id": "task-1",
       "title": "Short title",
       "description": "Detailed description of what to implement, including exact file names, function names, and key requirements. Be specific enough that a developer can implement it without asking questions.",
-      "dependencies": []
+      "dependencies": [],
+      "verification": "Optional: a shell command that proves the subtask is complete (e.g., 'npm test -- src/foo.test.ts' or 'python -m pytest tests/test_bar.py')"
     }
   ]
 }`;
@@ -167,25 +170,25 @@ export class ArchitectAgent {
       }
 
       const parsed = JSON.parse(jsonStr);
+      const validated = TaskPlanSchema.parse(parsed);
 
-      // Validate structure
-      if (!parsed.goal || !Array.isArray(parsed.subtasks) || parsed.subtasks.length === 0) {
-        throw new Error("Invalid plan structure");
-      }
-
-      // Validate and normalize each subtask
-      const subtasks: Subtask[] = parsed.subtasks.map((st: Record<string, unknown>, i: number) => ({
-        id: (st.id as string) || `task-${i + 1}`,
-        title: (st.title as string) || `Task ${i + 1}`,
-        description: (st.description as string) || (st.title as string) || "",
-        dependencies: Array.isArray(st.dependencies) ? st.dependencies as string[] : [],
+      const subtasks: Subtask[] = validated.subtasks.map((st, i) => ({
+        id: st.id || `task-${i + 1}`,
+        title: st.title || `Task ${i + 1}`,
+        description: st.description || st.title || "",
+        dependencies: st.dependencies || [],
+        verification: st.verification,
       }));
 
       return {
-        goal: parsed.goal as string,
+        goal: validated.goal,
         subtasks,
       };
-    } catch {
+    } catch (err) {
+      if (err && typeof err === "object" && "issues" in err) {
+        const issues = (err as any).issues.map((e: any) => `${e.path.join(".")}: ${e.message}`).join(", ");
+        console.log(chalk.yellow(`[architect] ⚠ Plan validation failed: ${issues}`));
+      }
       // Fallback: single subtask
       return {
         goal: fallback,

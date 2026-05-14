@@ -1,6 +1,4 @@
-import * as readline from "node:readline";
 import chalk from "chalk";
-import { Writable } from "node:stream";
 
 /**
  * Terminal UI manager for an interactive chat-like experience.
@@ -28,7 +26,6 @@ export interface TUIOptions {
 }
 
 export class TUI {
-  private rl: readline.Interface | null = null;
   private model: string;
   private provider: string;
 
@@ -75,42 +72,152 @@ export class TUI {
 
   /**
    * Get a single line of input from the user.
+   * In raw mode so multi-line pastes can be collapsed.
    * Returns null if the user wants to exit.
    */
   private getInput(): Promise<string | null> {
     return new Promise((resolve) => {
-      if (this.rl) {
-        this.rl.close();
-      }
+      const stdin = process.stdin;
+      const stdout = process.stdout;
 
-      // Use a muted stream so the prompt doesn't echo
-      const muted = new Writable({
-        write(_chunk, _encoding, callback) {
-          callback();
-        },
-      });
-
-      this.rl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-        terminal: true,
-      });
+      let buffer = "";
+      let pasteMode = false;
+      let active = true;
+      let lastDataTime = Date.now();
 
       const promptStr = chalk.green(chalk.bold("> "));
 
-      this.rl.question(promptStr, (answer) => {
-        // Close readline immediately so other readline instances
-        // (e.g. ask_user_question) don't conflict with stdin
-        this.rl!.close();
-        this.rl = null;
+      const render = () => {
+        if (!active) return;
+        stdout.write("\r\x1b[2K");
+        const hasNewlines = buffer.includes("\n") || buffer.includes("\r");
+        if (pasteMode || hasNewlines) {
+          const lines = buffer.split(/\r?\n/).length;
+          const summary = lines > 1 ? `[pasted ${lines} lines]` : `[pasted ${buffer.length} chars]`;
+          stdout.write(promptStr + chalk.gray(summary));
+        } else {
+          stdout.write(promptStr + buffer);
+        }
+      };
 
-        const trimmed = answer.trim();
-        if (!trimmed) {
-          resolve("");
+      const cleanup = () => {
+        if (!active) return;
+        active = false;
+        if ("setRawMode" in stdin && typeof stdin.setRawMode === "function") {
+          stdin.setRawMode(false);
+        }
+        stdout.write("\x1b[?2004l");
+        stdin.pause();
+        stdin.removeAllListeners("data");
+        stdout.write("\n");
+      };
+
+      const onData = (data: string) => {
+        if (!active) return;
+
+        const now = Date.now();
+        const timeSinceLastData = now - lastDataTime;
+        lastDataTime = now;
+
+        // Bracketed paste start (sent by modern terminals when the user pastes)
+        if (data.startsWith("\x1b[200~")) {
+          pasteMode = true;
+          data = data.slice(6);
+          if (!data) return;
+        }
+
+        // Bracketed paste end
+        if (data.startsWith("\x1b[201~")) {
+          data = data.slice(6);
+          if (!data) return;
+        }
+
+        // Ignore other escape sequences (arrows, function keys, etc.)
+        if (data.startsWith("\x1b")) {
           return;
         }
-        resolve(trimmed);
-      });
+
+        // Enter / Return — distinguish pasted newlines from real Enter
+        if (data === "\r" || data === "\n" || data === "\r\n") {
+          // If bracketed-paste mode signalled a paste, or the newline arrived
+          // very quickly after buffered data, treat it as part of a paste.
+          if (pasteMode || (buffer.length > 0 && timeSinceLastData < 100)) {
+            pasteMode = true;
+            buffer += "\n";
+            render();
+            return;
+          }
+          cleanup();
+          resolve(buffer.trim());
+          return;
+        }
+
+        // Ctrl+C
+        if (data === "\x03") {
+          cleanup();
+          process.exit(0);
+        }
+
+        // Ctrl+D (EOF)
+        if (data === "\x04") {
+          cleanup();
+          resolve(null);
+          return;
+        }
+
+        // Detect paste heuristically: multi-line or large chunk
+        const hasNewline = data.includes("\n") || data.includes("\r");
+        if ((hasNewline && data.length > 1) || data.length > 5) {
+          pasteMode = true;
+        }
+
+        for (let i = 0; i < data.length; i++) {
+          const code = data.charCodeAt(i);
+
+          // Backspace / Delete
+          if (code === 127 || code === 8) {
+            if (buffer.length > 0) {
+              buffer = buffer.slice(0, -1);
+              if (buffer.length === 0) {
+                pasteMode = false;
+              }
+            }
+            continue;
+          }
+
+          // Tab
+          if (code === 9) {
+            buffer += "\t";
+            continue;
+          }
+
+          // Normalize any pasted newlines to \n
+          if (code === 10 || code === 13) {
+            buffer += "\n";
+            continue;
+          }
+
+          // Skip other control characters
+          if (code < 32) {
+            continue;
+          }
+
+          buffer += data[i];
+        }
+
+        render();
+      };
+
+      if ("setRawMode" in stdin && typeof stdin.setRawMode === "function") {
+        stdin.setRawMode(true);
+      }
+      stdin.resume();
+      stdin.setEncoding("utf8");
+      stdin.on("data", onData);
+
+      // Enable bracketed paste mode
+      stdout.write("\x1b[?2004h");
+      stdout.write(promptStr);
     });
   }
 
@@ -118,10 +225,6 @@ export class TUI {
    * Close the TUI and clean up.
    */
   close(): void {
-    if (this.rl) {
-      this.rl.close();
-      this.rl = null;
-    }
     console.log(chalk.gray("\n  Goodbye! 🐝\n"));
   }
 

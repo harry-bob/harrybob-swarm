@@ -2,54 +2,77 @@
 
 ## LLMAgent (`llm-agent.ts`)
 
-The core agent class that all agents use. Wraps an LLM provider with a tool-calling loop.
+Core wrapper around an LLM provider with a streaming tool-calling loop.
 
-### Execute Flow
+### Execution Flow
 
 ```
-LLMAgent.execute(task)
-  │
-  ├─ Add system prompt + task messages to context
-  │
-  └─ Loop (no max iterations):
-      ├─ Call LLM with messages + tool definitions
-      ├─ If LLM returns tool calls:
-      │   ├─ Execute each tool
-      │   ├─ Add tool results to messages
-      │   └─ Continue loop
-      └─ If LLM returns text only:
-          └─ Return AgentResult { output, tokenUsage }
+LLMAgent.startTask(task)
+│
+├─ Push system prompt + task messages onto history.
+├─ Reset tool cache and modification tracking.
+│
+└─ Loop (no hard iteration limit):
+    ├─ Compact history if > 32 messages (keep first 2 + last 8, summarize middle).
+    ├─ Stream provider response.
+    ├─ If response contains tool calls:
+    │   ├─ Execute each tool in parallel.
+    │   ├─ Track modifying tools (write_file, edit_file, run_command).
+    │   ├─ Cache read-only tool results.
+    │   ├─ Append tool results to history as user messages.
+    │   └─ Continue.
+    └─ If response is text only:
+        └─ Return { output, tokenUsage }.
 ```
 
-### Key Properties
+### Properties
 
-- `role` — identifies the agent (e.g. `coder:task-1`)
-- `model` — LLM model name
-- `provider` — Ollama/OpenAI provider instance
-- `tools` — ToolRegistry with available tools
-- `hasModifiedFiles` — tracks if write_file/edit_file/run_command were called
+| Property | Description |
+|----------|-------------|
+| `role` | Agent identity, e.g. `coder:task-1` |
+| `model` | Model name passed to the provider |
+| `provider` | Ollama or OpenAI provider instance |
+| `tools` | `ToolRegistry` containing callable tools |
+| `hasModifiedFiles()` | Returns `true` if the agent called `write_file`, `edit_file`, or `run_command` in the current conversation |
+
+### Conversation Continuity
+
+- `startTask()` initializes a fresh conversation with system prompt + task.
+- `continueChat(userMessage)` appends a user message and runs the tool loop again.
+- Full history is preserved across review rounds so the coder remembers all prior edits and feedback.
+
+### History Compaction
+
+When history exceeds **32 messages**:
+1. Keep the first 2 messages (system + initial task).
+2. Keep the last 8 messages (recent turns).
+3. Summarize the middle section into a `[Context compressed]` system message.
+
+This prevents context-window bloat during long review loops.
 
 ### Streaming
 
-- Uses `provider.stream()` for real-time output
-- Thinking/reasoning displayed with 💭 prefix
-- TPS (tokens/sec) meter shown during generation
+- Uses `provider.chatStream()` for real-time tokens.
+- Reasoning tokens prefixed with 💭.
+- TPS (tokens/sec) displayed during generation.
 
 ## BaseAgent (`base.ts`)
 
-Abstract class defining the agent interface:
+Abstract interface implemented by all agents.
 
 ```typescript
 interface AgentTask {
   id: string;
   description: string;
+  context?: string;
   messages: Message[];
 }
 
 interface AgentResult {
+  taskId: string;
+  agentRole: string;
   output: string;
   tokenUsage: { prompt: number; completion: number };
-  agentRole: string;
   duration: number;
 }
 ```

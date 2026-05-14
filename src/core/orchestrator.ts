@@ -65,8 +65,7 @@ function createArchitectTools(sandbox: Sandbox, provider: any, model: string, co
   r.register(createListFilesTool(sandbox));
   if (!isToolDisabled("ask_user_question", config)) r.register(createAskUserQuestionTool());
   if (!isToolDisabled("web_search", config)) r.register(createWebSearchTool());
-  // TEMPORARILY DISABLED — to re-enable, uncomment the line below
-  // if (!isToolDisabled("research", config)) r.register(createResearchTool(provider, model, sandbox));
+  if (!isToolDisabled("research", config)) r.register(createResearchTool(provider, model, sandbox));
   return r;
 }
 
@@ -382,7 +381,6 @@ export class Orchestrator {
   ): Promise<void> {
     const cache = new FileCache();
     const coderConfig = this.config.agents.coder;
-    const reviewerConfig = this.config.agents.reviewer;
 
     // Build dependency context
     const depContext = subtask.dependencies
@@ -423,62 +421,87 @@ export class Orchestrator {
       // First coder pass
       console.log(chalk.blue(`  │ 🛠  Coder`));
       let iteration = 0;
-      let lastCoderOutput = "";
 
       // Use continueChat with empty string since startTask already added the message
       const coderResult = await coder.continueChat("");
 
-      const coderAgentResult: AgentResult = {
+      allResults.push({
         taskId: `coder:${subtask.id}:${iteration}`,
         agentRole: `coder:${subtask.id}`,
         output: coderResult.output,
         tokenUsage: coderResult.tokenUsage,
         duration: 0,
-      };
-      allResults.push(coderAgentResult);
-      lastCoderOutput = coderResult.output;
+      });
       iteration++;
 
-      // ── Reviewer loop ──────────────────────────────────────
+      // ── Stubborn retry: coder must actually modify files ─────
+      let stubbornRetries = 0;
+      while (!coder.hasModifiedFiles() && stubbornRetries < 5) {
+        stubbornRetries++;
+        console.log(chalk.yellow(`  │ ⚠ No files modified — stubborn retry ${stubbornRetries}/5`));
+        const stubbornResult = await coder.continueChat(
+          `IMPORTANT: You have not yet created or modified any files. You MUST use write_file, edit_file, or run_command to implement this task. Empty responses are not acceptable. Please implement the task now.`
+        );
+        allResults.push({
+          taskId: `coder:${subtask.id}:stubborn-${stubbornRetries}`,
+          agentRole: `coder:${subtask.id}`,
+          output: stubbornResult.output,
+          tokenUsage: stubbornResult.tokenUsage,
+          duration: 0,
+        });
+      }
+
+      // ── Reviewer consensus loop ────────────────────────────
       const maxRounds = this.maxReviewerRounds;
 
       while (iteration <= maxRounds) {
         // Release semaphore during review so other tasks can code
         semaphore.release();
 
-        // Create reviewer (fresh each round — read-only, no need for continuity)
-        const reviewer = new LLMAgent(
-          {
-            role: `reviewer:${subtask.id}`,
-            systemPrompt: reviewerConfig.systemPrompt + REVIEWER_TOOLS_PROMPT,
-          },
-          this.config.model,
-          this.provider,
-          createReviewerTools(this.sandbox)
-        );
+        console.log(chalk.blue(`  │ 🔍 Reviewers (round ${iteration})`));
 
-        console.log(chalk.blue(`  │ 🔍 Reviewer (round ${iteration})`));
+        // Run 2 reviewers in parallel for consensus
+        const settled = await Promise.allSettled([
+          this.runReviewer(subtask, iteration, 1),
+          this.runReviewer(subtask, iteration, 2),
+        ]);
 
+        const reviewA: AgentResult = settled[0].status === "fulfilled"
+          ? settled[0].value
+          : {
+              taskId: `task-${subtask.id}-reviewer-${iteration}-1`,
+              agentRole: `reviewer:${subtask.id}-1`,
+              output: `[STATUS: NEEDS_WORK]\nReviewer 1 failed: ${settled[0].reason}`,
+              tokenUsage: { prompt: 0, completion: 0 },
+              duration: 0,
+            };
+
+        const reviewB: AgentResult = settled[1].status === "fulfilled"
+          ? settled[1].value
+          : {
+              taskId: `task-${subtask.id}-reviewer-${iteration}-2`,
+              agentRole: `reviewer:${subtask.id}-2`,
+              output: `[STATUS: NEEDS_WORK]\nReviewer 2 failed: ${settled[1].reason}`,
+              tokenUsage: { prompt: 0, completion: 0 },
+              duration: 0,
+            };
+
+        allResults.push(reviewA, reviewB);
+
+        const approvedA = reviewA.output.includes("[STATUS: APPROVED]");
+        const approvedB = reviewB.output.includes("[STATUS: APPROVED]");
+        const consensus = approvedA && approvedB;
+
+        // Re-acquire for next phase
         await semaphore.acquire();
 
-        const reviewResult = await reviewer.execute({
-          id: `task-${subtask.id}-reviewer-${iteration}`,
-          description: subtask.description,
-          messages: [{
-            role: "user",
-            content: `Task: ${subtask.description}\n\nCode has been written. Use tools to read files and inspect the code, then review it.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if code is good\n[STATUS: NEEDS_WORK] — if it needs improvements`,
-          }],
-        });
+        if (consensus) {
+          console.log(chalk.green(`  └─ ✅ Approved by consensus (2/2)`));
+          break;
+        }
 
-        allResults.push(reviewResult);
-
-        // Check review status
-        if (reviewResult.output.includes("[STATUS: APPROVED]") || iteration >= maxRounds) {
-          if (iteration >= maxRounds && !reviewResult.output.includes("[STATUS: APPROVED]")) {
-            console.log(chalk.yellow(`  └─ ⏰ Max review rounds reached — accepting`));
-          } else {
-            console.log(chalk.green(`  └─ ✅ Approved`));
-          }
+        if (iteration >= maxRounds) {
+          console.log(chalk.yellow(`  └─ ⏰ Max review rounds reached — accepting without consensus`));
           break;
         }
 
@@ -486,23 +509,52 @@ export class Orchestrator {
         console.log(chalk.yellow(`  │ 🔄 Needs work — sending feedback to coder`));
         reviewRounds.set(subtask.id, (reviewRounds.get(subtask.id) || 0) + 1);
 
-        // Re-acquire for coder (already acquired above via the loop)
         console.log(chalk.blue(`  │ 🛠  Coder (round ${iteration + 1})`));
 
-        const coderFixResult = await coder.continueChat(
-          `The reviewer found issues. Here is the review feedback:\n\n${reviewResult.output}\n\nFix the issues and improve the code. Use tools to read/edit files.`
-        );
+        const feedback = this.buildConsensusFeedback(reviewA, reviewB, approvedA, approvedB);
+        const coderFixResult = await coder.continueChat(feedback);
 
-        const fixAgentResult: AgentResult = {
+        allResults.push({
           taskId: `coder:${subtask.id}:${iteration}`,
           agentRole: `coder:${subtask.id}`,
           output: coderFixResult.output,
           tokenUsage: coderFixResult.tokenUsage,
           duration: 0,
-        };
-        allResults.push(fixAgentResult);
-        lastCoderOutput = coderFixResult.output;
+        });
         iteration++;
+      }
+
+      // ── Verification gate ──────────────────────────────────
+      if (subtask.verification) {
+        console.log(chalk.blue(`  │ 🧪 Verification: ${subtask.verification}`));
+        const verifier = createRunCommandTool(this.sandbox);
+        let vAttempts = 0;
+        const maxVAttempts = 2;
+
+        while (vAttempts < maxVAttempts) {
+          vAttempts++;
+          const vResult = await verifier.execute({ command: subtask.verification, timeout: 60 });
+          const vFailed = vResult.includes("EXIT CODE:") && !vResult.includes("EXIT CODE: 0");
+
+          if (!vFailed) {
+            console.log(chalk.green(`  │ ✅ Verification passed`));
+            break;
+          }
+
+          console.log(chalk.red(`  │ ❌ Verification failed (attempt ${vAttempts}/${maxVAttempts})`));
+          if (vAttempts < maxVAttempts) {
+            const vFix = await coder.continueChat(
+              `The verification command failed. Please fix the code so the following command succeeds:\n\n${subtask.verification}\n\nOutput:\n${vResult}`
+            );
+            allResults.push({
+              taskId: `coder:${subtask.id}:verify-fix-${vAttempts}`,
+              agentRole: `coder:${subtask.id}`,
+              output: vFix.output,
+              tokenUsage: vFix.tokenUsage,
+              duration: 0,
+            });
+          }
+        }
       }
 
       // Mark done
@@ -621,6 +673,58 @@ Respond with ONLY a JSON array, no other text:
     } catch {
       // Re-planning is best-effort — don't fail the whole run
     }
+  }
+
+  // ── Reviewer helpers ───────────────────────────────────────
+
+  private async runReviewer(
+    subtask: Subtask,
+    round: number,
+    reviewerIndex: number
+  ): Promise<AgentResult> {
+    const reviewerConfig = this.config.agents.reviewer;
+    const reviewer = new LLMAgent(
+      {
+        role: `reviewer:${subtask.id}-${reviewerIndex}`,
+        systemPrompt: reviewerConfig.systemPrompt + REVIEWER_TOOLS_PROMPT,
+      },
+      this.config.model,
+      this.provider,
+      createReviewerTools(this.sandbox)
+    );
+
+    return reviewer.execute({
+      id: `task-${subtask.id}-reviewer-${round}-${reviewerIndex}`,
+      description: subtask.description,
+      messages: [{
+        role: "user",
+        content: `Task: ${subtask.description}\n\nCode has been written. Use tools to read files and inspect the code, then review it.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if code is good\n[STATUS: NEEDS_WORK] — if it needs improvements`,
+      }],
+    });
+  }
+
+  private buildConsensusFeedback(
+    r1: AgentResult,
+    r2: AgentResult,
+    approved1: boolean,
+    approved2: boolean
+  ): string {
+    const parts: string[] = [
+      "The reviewers found issues. Here is the review feedback:\n\n",
+      `=== Reviewer 1 (${approved1 ? "APPROVED" : "NEEDS_WORK"}) ===\n${r1.output}\n\n`,
+      `=== Reviewer 2 (${approved2 ? "APPROVED" : "NEEDS_WORK"}) ===\n${r2.output}\n\n`,
+    ];
+
+    if (approved1 && !approved2) {
+      parts.push("Note: Reviewer 1 approved but Reviewer 2 did not. Address Reviewer 2's concerns specifically.\n\n");
+    } else if (!approved1 && approved2) {
+      parts.push("Note: Reviewer 2 approved but Reviewer 1 did not. Address Reviewer 1's concerns specifically.\n\n");
+    } else {
+      parts.push("Note: Both reviewers rejected the code. Address all concerns above.\n\n");
+    }
+
+    parts.push("Fix the issues and improve the code. Use tools to read/edit files.");
+    return parts.join("");
   }
 
   // ── Display helpers ───────────────────────────────────────

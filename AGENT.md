@@ -1,65 +1,73 @@
-# Agent Architecture
+# Swarm Agent Architecture
 
 ## Overview
 
-Swarm uses a multi-agent system with four specialized roles:
+Swarm is a multi-agent coding system that decomposes tasks into smaller subtasks and routes them to specialized agents.
 
 ```
-User → Leader (Architect) → Researcher (tool)
-                          → Coder → Reviewer
-                                    ↻ loop until approved
+User Request
+     │
+     ▼
+┌─────────────┐     ┌─────────────┐
+│  Leader/    │────▶│  Researcher │
+│  Architect  │     │   (tool)    │
+└─────────────┘     └─────────────┘
+     │
+     ▼
+┌─────────────┐     ┌─────────────┐
+│    Coder    │◀────│ Reviewer 1  │
+│             │     ├─────────────┤
+│             │◀────│ Reviewer 2  │
+└─────────────┘     └─────────────┘
+     │                    ▲
+     └────────────────────┘
+   loop until 2/2 consensus
 ```
 
-## Agent Roles
+## Roles
 
-### Leader (Architect)
-- **File**: `src/core/architect.ts`
-- **Role**: Decomposes tasks into subtasks with dependencies
-- **Tools**: `read_file`, `list_files`, `ask_user_question`, `web_search`, `research`
-- **System Prompt**: "You are a software architect. Analyze the task, read existing code, and create a detailed execution plan."
-- **Behavior**: Reads codebase first, then creates a `TaskPlan` with subtasks
+| Role | File | Purpose |
+|------|------|---------|
+| **Leader** | `src/core/architect.ts` | Decomposes tasks into a dependency-aware `TaskPlan` with Zod validation |
+| **Researcher** | `src/tools/research.ts` | Gathers context for the Leader via `web_search` and file reads |
+| **Coder** | `src/agents/llm-agent.ts` | Implements subtasks; writes and edits files |
+| **Reviewer** | `src/agents/llm-agent.ts` | Validates code for bugs, security, and performance (consensus voting) |
 
-### Researcher
-- **File**: `src/tools/research.ts`
-- **Role**: Gathers information for the Leader
-- **Tools**: `web_search`, `read_file`, `list_files`
-- **System Prompt**: "You are a research agent. Gather information to help the architect plan effectively."
-- **Behavior**: Spawned as a tool call from the Leader, returns structured findings
+## Communication Flow
 
-### Coder
-- **File**: `src/agents/llm-agent.ts` (generic LLMAgent)
-- **Role**: Writes and modifies code
-- **Tools**: `read_file`, `write_file`, `edit_file`, `list_files`, `run_command`, `web_search`
-- **System Prompt**: "You are an expert software developer. Write clean, efficient, production-ready code."
-- **Stubborn Retry**: If coder doesn't modify any files, orchestrator re-prompts up to 5 times
+1. **Leader** analyzes the codebase and produces a validated `TaskPlan` with subtasks, dependencies, and optional verification commands.
+2. **Coder** receives a subtask description plus outputs from any dependencies.
+3. **Stubborn Retry**: If the Coder finishes without touching any files (`write_file`, `edit_file`, or `run_command`), the Orchestrator re-prompts with stronger instructions up to **5 retries**.
+4. **Reviewer Consensus**: Two reviewers inspect the code in parallel. Both must return `[STATUS: APPROVED]` for consensus. If one rejects, the Coder receives both reviews with a note about which reviewer to prioritize.
+5. **Verification Gate**: If the subtask has a `verification` command (e.g., `npm test`), it runs after consensus. If it fails, the Coder gets one auto-fix attempt.
+6. If rejected at any gate, the Coder receives the feedback and retries. Max **3 review rounds** before forced acceptance.
 
-### Reviewer
-- **File**: `src/agents/llm-agent.ts` (generic LLMAgent)
-- **Role**: Reviews code quality and correctness
-- **Tools**: `read_file`, `list_files`, `run_command` (read-only)
-- **System Prompt**: "You are a senior code reviewer. Review code for bugs, security, performance."
-- **Behavior**: Must end with `[STATUS: APPROVED]` or `[STATUS: NEEDS_WORK]`
+## Tool Assignment
 
-## Agent Communication
+| Tool | Leader | Coder | Reviewer | Researcher |
+|------|:------:|:-----:|:--------:|:----------:|
+| `read_file` | ✅ | ✅ | ✅ | ✅ |
+| `write_file` | ❌ | ✅ | ❌ | ❌ |
+| `edit_file` | ❌ | ✅ | ❌ | ❌ |
+| `list_files` | ✅ | ✅ | ✅ | ✅ |
+| `run_command` | ❌ | ✅ | read-only | ❌ |
+| `web_search` | ✅* | ✅* | ❌ | ✅ |
+| `research` | ✅* | ❌ | ❌ | ❌ |
+| `ask_user_question` | ✅* | ❌ | ❌ | ❌ |
 
-1. Leader → Coder: task description + dependencies
-2. Coder → Reviewer: completed code (via file tools)
-3. Reviewer → Coder: feedback (if NEEDS_WORK)
-4. Loop until APPROVED
+\* Disabled when listed in `config.disabledTools`.
 
-## Disabled Tools
+## Plan Validation
 
-The `disabledTools` config option prevents specific tools from being registered:
-- `web_search` — no web access
-- `research` — no researcher agent
-- `ask_user_question` — no interactive prompts (critical for benchmark runners)
+Architect plans are validated with **Zod** (`src/core/validation.ts`). Invalid plans log specific schema errors and fall back to a single-subtask plan.
 
-## Token Budget
+## Rate-Limit Considerations
 
-Each agent makes multiple LLM calls per task:
-- Architect: 1 call (plan)
-- Coder: 1+ calls (implement + retry)
-- Reviewer: 1+ calls (review + re-review)
+Each task consumes multiple LLM calls:
+
+- Architect: 1 call
+- Coder: 1+ calls (implementation + stubborn retries + verification fixes)
+- Reviewer: 2 calls per round (consensus voting)
 - Researcher: 1 call per query
 
-With 5 parallel workers, this multiplies rapidly — leading to 429 rate limits on cloud APIs.
+With multiple parallel workers and dual reviewers, this can exhaust cloud API quotas quickly.
