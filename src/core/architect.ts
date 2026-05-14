@@ -204,6 +204,12 @@ export class ArchitectAgent {
     while (rounds < MAX_TOOL_ROUNDS) {
       rounds++;
 
+      // Inject a progress summary so the model cannot miss what it already did
+      const progressSummary = this.summarizeInvestigationProgress(messages);
+      if (progressSummary) {
+        messages.push({ role: "system", content: progressSummary });
+      }
+
       const response = await withRetry(() => this.provider.chat({
         model: this.model,
         messages,
@@ -466,5 +472,46 @@ export class ArchitectAgent {
       if (dfs(st.id)) return true;
     }
     return false;
+  }
+
+  /**
+   * Summarize prior tool calls in the investigation conversation so the model
+   * cannot miss them.  Produces a short system message listing each tool call
+   * with a truncated result preview.
+   */
+  private summarizeInvestigationProgress(messages: ChatMessage[]): string | null {
+    const calls: { name: string; args: string; preview: string }[] = [];
+
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (msg.role === "assistant" && msg.tool_calls && msg.tool_calls.length > 0) {
+        for (const tc of msg.tool_calls) {
+          // Look for the matching user result message (usually the next one or soon after)
+          let result = "";
+          for (let j = i + 1; j < messages.length && j <= i + tc.id ? 5 : 3; j++) {
+            const candidate = messages[j];
+            if (
+              candidate.role === "user" &&
+              candidate.content.startsWith(`Tool "${tc.name}" result:`)
+            ) {
+              result = candidate.content.slice(`Tool "${tc.name}" result:\n`.length);
+              break;
+            }
+          }
+
+          const argsStr = Object.entries(tc.arguments)
+            .map(([k, v]) => `${k}: ${JSON.stringify(v).slice(0, 40)}`)
+            .join(", ");
+
+          const preview = result.slice(0, 120).replace(/\n/g, " ") + (result.length > 120 ? "..." : "");
+          calls.push({ name: tc.name, args: argsStr, preview });
+        }
+      }
+    }
+
+    if (calls.length === 0) return null;
+
+    const lines = calls.map((c) => `  • ${c.name}(${c.args}) → ${c.preview}`);
+    return `[State] Tools already used this investigation — do NOT repeat any of these:\n${lines.join("\n")}`;
   }
 }
