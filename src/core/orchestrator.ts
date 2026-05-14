@@ -462,6 +462,11 @@ export class Orchestrator {
         });
       }
 
+      // Extract what the coder actually changed
+      const modifiedFiles = coder.getModifiedFiles();
+      const lastCoderResult = allResults[allResults.length - 1] || { output: "" };
+      const coderSummary = lastCoderResult.output;
+
       // ── Reviewer consensus loop ────────────────────────────
       const maxRounds = this.maxReviewerRounds;
 
@@ -473,8 +478,8 @@ export class Orchestrator {
 
         // Run 2 reviewers in parallel for consensus
         const settled = await Promise.allSettled([
-          this.runReviewer(subtask, iteration, 1),
-          this.runReviewer(subtask, iteration, 2),
+          this.runReviewer(subtask, iteration, 1, modifiedFiles, coderSummary),
+          this.runReviewer(subtask, iteration, 2, modifiedFiles, coderSummary),
         ]);
 
         const reviewA: AgentResult = settled[0].status === "fulfilled"
@@ -687,7 +692,9 @@ Respond with ONLY a JSON object, no other text:
   private async runReviewer(
     subtask: Subtask,
     round: number,
-    reviewerIndex: number
+    reviewerIndex: number,
+    modifiedFiles: string[],
+    coderSummary: string
   ): Promise<AgentResult> {
     const reviewerConfig = this.config.agents.reviewer;
     const reviewer = new LLMAgent(
@@ -700,12 +707,20 @@ Respond with ONLY a JSON object, no other text:
       createReviewerTools(this.sandbox)
     );
 
+    const filesList = modifiedFiles.length > 0
+      ? `Files modified by the coder:\n${modifiedFiles.map((f) => `  • ${f}`).join("\n")}`
+      : "(The coder did not report any modified files — inspect the codebase to find what was changed.)";
+
+    const summaryBlock = coderSummary
+      ? `Coder's summary of changes:\n---\n${coderSummary.slice(0, 1200)}\n---\n`
+      : "(No summary provided by the coder.)";
+
     return reviewer.execute({
       id: `task-${subtask.id}-reviewer-${round}-${reviewerIndex}`,
       description: subtask.description,
       messages: [{
         role: "user",
-        content: `Task: ${subtask.description}\n\nCode has been written. You are Reviewer ${reviewerIndex}.\n\nUse tools to read files, inspect the code, WRITE YOUR OWN INDEPENDENT TEST SCRIPT, run it, and review the results.\n\n- Write your test to a unique file (e.g. .swarm-review-reviewer${reviewerIndex}-${subtask.id}.test.ts or similar) so it does not conflict with the other reviewer.\n- Run your test with run_command.\n- Report whether your test passed or failed.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if all checklist items pass AND your independent test passed\n[STATUS: NEEDS_WORK] — if any item fails or your test failed`,
+        content: `Task: ${subtask.description}\n\n${filesList}\n\n${summaryBlock}\n\nReview the code. Read the files listed above, WRITE YOUR OWN INDEPENDENT TEST SCRIPT, run it, and report your findings.\n\n- Write your test to a unique file (e.g. .swarm-review-${subtask.id}-${reviewerIndex}.test.ts or similar) so it does not conflict with the other reviewer.\n- Run your test with run_command.\n- Report whether your test passed or failed.\n\nEnd with exactly one line:\n[STATUS: APPROVED] — if all checklist items pass AND your independent test passed\n[STATUS: NEEDS_WORK] — if any item fails or your test failed`,
       }],
     });
   }

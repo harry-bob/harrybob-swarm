@@ -58,7 +58,7 @@ export class LLMAgent extends BaseAgent {
   private toolCache = new Map<string, string>();
   private readonly READONLY_TOOLS = new Set(["read_file", "list_files", "web_search"]);
   private readonly MODIFYING_TOOLS = new Set(["write_file", "edit_file", "run_command"]);
-  private hasModifiedFilesFlag = false;
+  private modifiedFiles = new Set<string>();
   private readonly MAX_HISTORY = 32; // trigger compaction
   private readonly KEEP_RECENT = 8;  // keep last N messages intact
   private readonly KEEP_FIRST = 2;   // keep system + initial user message
@@ -75,7 +75,7 @@ export class LLMAgent extends BaseAgent {
   startTask(task: AgentTask): void {
     this.history = this.buildMessages(task);
     this.toolCache.clear();
-    this.hasModifiedFilesFlag = false;
+    this.modifiedFiles.clear();
   }
 
   /**
@@ -103,7 +103,7 @@ export class LLMAgent extends BaseAgent {
   resetHistory(): void {
     this.history = [];
     this.toolCache.clear();
-    this.hasModifiedFilesFlag = false;
+    this.modifiedFiles.clear();
   }
 
   /**
@@ -111,7 +111,14 @@ export class LLMAgent extends BaseAgent {
    * (write_file, edit_file, or run_command) during this conversation.
    */
   hasModifiedFiles(): boolean {
-    return this.hasModifiedFilesFlag;
+    return this.modifiedFiles.size > 0;
+  }
+
+  /**
+   * Returns the list of file paths modified or created by this agent.
+   */
+  getModifiedFiles(): string[] {
+    return [...this.modifiedFiles];
   }
 
   /**
@@ -300,7 +307,8 @@ export class LLMAgent extends BaseAgent {
 
           // Track file-modifying tool usage
           if (this.MODIFYING_TOOLS.has(toolCall.name)) {
-            this.hasModifiedFilesFlag = true;
+            const filePath = (toolCall.arguments.path as string) || "";
+            if (filePath) this.modifiedFiles.add(filePath);
           }
 
           // Cache read-only results
