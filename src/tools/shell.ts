@@ -2,7 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { Tool } from "./types.js";
 import { Sandbox } from "./sandbox.js";
 
-const DEFAULT_TIMEOUT_MS = 30_000;
+const DEFAULT_TIMEOUT_MS = 90_000;
 const MAX_BUFFER = 10 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;
 const HARD_RESOLVE_MS = 5_000;
