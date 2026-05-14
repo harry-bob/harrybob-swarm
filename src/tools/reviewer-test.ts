@@ -1,5 +1,5 @@
-import { writeFile, mkdir } from "node:fs/promises";
-import { join } from "node:path";
+import { writeFile, unlink } from "node:fs/promises";
+import { join, extname } from "node:path";
 import { Tool } from "./types.js";
 import { Sandbox } from "./sandbox.js";
 import { runCommand } from "./shell.js";
@@ -13,7 +13,7 @@ export function createReviewerTestTool(
     definition: {
       name: "do_test",
       description:
-        "Write and automatically execute an independent test script. The code is saved to test/{taskId}/reviewer{index}/ and run. Returns the execution output including stdout, stderr, and exit code.",
+        "Write and automatically execute an independent test script in the project home directory. The code is saved to a temporary file, run from the project root, and deleted immediately after execution. Returns the execution output including stdout, stderr, and exit code.",
       parameters: {
         code: {
           type: "string",
@@ -31,36 +31,48 @@ export function createReviewerTestTool(
     async execute(args) {
       const code = args.code as string;
       const filename = (args.filename as string) || "test.js";
+      const ext = extname(filename) || ".js";
 
-      // Build path inside the project sandbox
-      const relDir = `test/${taskId}/reviewer${reviewerIndex}`;
-      const dirPath = sandbox.validate(relDir);
-      const filePath = join(dirPath, filename);
+      // Create a temp file directly in the project root so imports work naturally
+      const tmpName = `.swarm-review-${taskId}-r${reviewerIndex}-${Date.now()}${ext}`;
+      const filePath = join(sandbox.getRoot(), tmpName);
 
-      await mkdir(dirPath, { recursive: true });
       await writeFile(filePath, code, "utf-8");
 
       // Determine runner from extension
-      const relFilePath = join(relDir, filename);
       let command: string;
       if (filename.endsWith(".py")) {
-        command = `python "${relFilePath}"`;
+        command = `python "${tmpName}"`;
       } else if (filename.endsWith(".ts")) {
-        command = `npx tsx "${relFilePath}"`;
+        command = `npx tsx "${tmpName}"`;
       } else if (filename.endsWith(".sh")) {
-        command = `bash "${relFilePath}"`;
+        command = `bash "${tmpName}"`;
       } else {
-        command = `node "${relFilePath}"`;
+        command = `node "${tmpName}"`;
       }
 
-      const output = await runCommand(command, sandbox.getRoot(), 60_000);
+      let output: string;
+      try {
+        output = await runCommand(command, sandbox.getRoot(), 60_000);
+      } catch (err) {
+        output = `Error during test execution: ${err instanceof Error ? err.message : String(err)}`;
+      }
+
+      // Delete immediately after running (best-effort)
+      try {
+        await unlink(filePath);
+      } catch {
+        // ignore cleanup errors
+      }
 
       return [
-        `Test saved to: ${relFilePath}`,
+        `Test executed from project root: ${tmpName}`,
         "",
-        `Executed: ${command}`,
+        `Command: ${command}`,
         "",
         output,
+        "",
+        "(test file deleted after execution)",
       ].join("\n");
     },
   };

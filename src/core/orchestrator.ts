@@ -213,7 +213,7 @@ export class Orchestrator {
     console.log(chalk.magenta(`${"─".repeat(60)}`));
 
     const architectTools = createArchitectTools(this.sandbox, this.provider, this.config.model, this.config);
-    const architect = new ArchitectAgent(this.provider, this.config.model, architectTools);
+    const architect = new ArchitectAgent(this.provider, this.config.model, architectTools, this.sandbox.getRoot());
     const plan = await architect.plan(taskDescription);
 
     this.printPlan(plan);
@@ -365,7 +365,7 @@ export class Orchestrator {
     const coder = new LLMAgent(
       {
         role: `coder:${subtask.id}`,
-        systemPrompt: coderConfig.systemPrompt + CODER_TOOLS_PROMPT,
+        systemPrompt: coderConfig.systemPrompt + CODER_TOOLS_PROMPT + `\n\nCurrent project directory: ${this.sandbox.getRoot()}`,
       },
       this.config.model,
       this.provider,
@@ -642,7 +642,7 @@ Respond with ONLY a JSON object, no other text:
     const reviewer = new LLMAgent(
       {
         role: `reviewer:${subtask.id}-${reviewerIndex}`,
-        systemPrompt: reviewerConfig.systemPrompt + REVIEWER_TOOLS_PROMPT,
+        systemPrompt: reviewerConfig.systemPrompt + REVIEWER_TOOLS_PROMPT + `\n\nCurrent project directory: ${this.sandbox.getRoot()}`,
       },
       this.config.model,
       this.provider,

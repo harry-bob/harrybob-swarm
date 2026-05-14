@@ -134,13 +134,15 @@ export class ArchitectAgent {
   private provider: LLMProvider;
   private model: string;
   private tools: ToolRegistry;
+  private projectDir: string;
   private toolCache = new Map<string, string>();
   private readonly CACHEABLE_TOOLS = new Set(["read_file", "list_files", "web_search"]);
 
-  constructor(provider: LLMProvider, model: string, tools: ToolRegistry) {
+  constructor(provider: LLMProvider, model: string, tools: ToolRegistry, projectDir?: string) {
     this.provider = provider;
     this.model = model;
     this.tools = tools;
+    this.projectDir = projectDir || process.cwd();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -194,6 +196,7 @@ export class ArchitectAgent {
 
     const messages: ChatMessage[] = [
       { role: "system", content: INVESTIGATOR_SYSTEM_PROMPT },
+      { role: "system", content: `Current project directory: ${this.projectDir}` },
       { role: "user", content: `The user wants: "${taskDescription}"\n\nInvestigate the project to understand what exists and what needs to change. Use your tools.` },
     ];
 
@@ -288,6 +291,7 @@ export class ArchitectAgent {
 
     const messages: ChatMessage[] = [
       { role: "system", content: PLANNER_SYSTEM_PROMPT },
+      { role: "system", content: `Current project directory: ${this.projectDir}` },
       { role: "user", content: prompt },
     ];
 
@@ -387,6 +391,7 @@ export class ArchitectAgent {
 
     const messages: ChatMessage[] = [
       { role: "system", content: PLANNER_SYSTEM_PROMPT },
+      { role: "system", content: `Current project directory: ${this.projectDir}` },
       { role: "user", content: prompt },
     ];
 
