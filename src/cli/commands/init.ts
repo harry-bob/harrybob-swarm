@@ -2,6 +2,7 @@ import { Command } from "commander";
 import { loadConfig, saveConfig } from "../../config/config.js";
 import { OllamaProvider } from "../../providers/ollama.js";
 import { log, logSuccess, logInfo, logWarning } from "../../utils/logger.js";
+import { getPackageVersion } from "../../utils/version.js";
 
 export function initCommand(program: Command): void {
   program
@@ -47,7 +48,7 @@ export function initCommand(program: Command): void {
       }
 
       const config = {
-        version: "0.1.0",
+        version: getPackageVersion(),
         provider: options.provider,
         model,
         baseURL: options.baseUrl,

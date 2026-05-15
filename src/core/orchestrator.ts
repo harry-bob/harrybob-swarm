@@ -6,6 +6,7 @@ import { createProvider } from "../providers/factory.js";
 import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool, createReviewerTestTool, createReviewerReturnTool } from "../tools/index.js";
 import { saveSession } from "./session.js";
 import { withTimeout } from "../utils/timeout.js";
+import { getPackageVersion } from "../utils/version.js";
 import chalk from "chalk";
 
 interface SwarmConfig {
@@ -200,7 +201,7 @@ export class Orchestrator {
     // ── Banner ────────────────────────────────────────────────
     console.log();
     console.log(chalk.cyan(boxTop()));
-    console.log(chalk.cyan(boxLine(chalk.bold("🐝 SWARM") + chalk.gray(` v${this.config.version || "0.1.0"}`))));
+    console.log(chalk.cyan(boxLine(chalk.bold("🐝 SWARM") + chalk.gray(` v${this.config.version || getPackageVersion()}`))));
     console.log(chalk.cyan(boxSep()));
     console.log(chalk.cyan(boxLine(`${chalk.white("Model:")}  ${this.config.model}`)));
     console.log(chalk.cyan(boxLine(`${chalk.white("Dir:")}    ${this.sandbox.getRoot()}`)));

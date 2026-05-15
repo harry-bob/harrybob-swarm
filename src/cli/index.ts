@@ -8,6 +8,7 @@ import { statusCommand } from "./commands/status.js";
 import { ollamaCommand } from "./commands/ollama.js";
 import { chatCommand, runChat } from "./commands/chat.js";
 import { modelCommand } from "./commands/model.js";
+import { getPackageVersion } from "../utils/version.js";
 
 export function createCLI(): Command {
   const program = new Command();
@@ -15,7 +16,7 @@ export function createCLI(): Command {
   program
     .name("swarm")
     .description("CLI swarm agent developer tool with multi-agent orchestration")
-    .version("0.1.0");
+    .version(getPackageVersion());
 
   // register commands
   initCommand(program);
