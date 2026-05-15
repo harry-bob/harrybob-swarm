@@ -2,6 +2,10 @@
 
 A CLI multi-agent coding tool. Give it a task, and it plans, codes, and reviews — automatically.
 
+> **🧪 Beta Release** — We're actively developing Swarm and your feedback makes it better.  
+> Found a bug, have an idea, or just want to say hi?  
+> **[Open an issue →](https://github.com/harry-bob/harrybob-swarm/issues)** — every comment helps!
+
 Powered by [Ollama](https://ollama.com) and built in TypeScript.
 
 ## Quick Start
