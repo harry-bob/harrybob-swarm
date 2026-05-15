@@ -12,5 +12,6 @@ Thank you for trying the beta release.
 We'd love your feedback:
   swarm feedback "your thoughts here"
 
-Report issues: https://github.com/harry-bob/harrybob-swarm/issues
+See all feedback & issues:
+  https://github.com/harry-bob/harrybob-swarm/issues
 `);
