@@ -1,3 +1,4 @@
+import { checkForUpdate } from "../../utils/version-check.js";
 import { Command } from "commander";
 import { runLogin } from "./login.js";
 import { Orchestrator } from "../../core/orchestrator.js";
@@ -16,6 +17,20 @@ export async function runChat(config: import("../../config/config.js").SwarmConf
     provider: config.provider,
     onEnter: printBetaBanner,
   });
+
+  // non-blocking version check — print inside TUI when ready
+  checkForUpdate().then((update) => {
+    if (update) {
+      tui.printSystem("");
+      tui.printSystem(
+        chalk.hex("#FBBF24")(
+          `  ⬆  Update available: ${update.current} → ${update.latest}`
+        )
+      );
+      tui.printSystem(chalk.gray(`     Run: npm install -g @harrybob/swarm-cli`));
+      tui.printSystem("");
+    }
+  }).catch(() => {});
 
   for await (const input of tui.prompt()) {
         // Skip empty input
