@@ -9,9 +9,5 @@ console.log(`
 🐝  Swarm CLI (BETA) installed successfully!
 
 Thank you for trying the beta release.
-We'd love your feedback:
-  swarm feedback "your thoughts here"
-
-See all feedback & issues:
-  https://github.com/harry-bob/harrybob-swarm/issues
+Feedback & issues: https://github.com/harry-bob/harrybob-swarm/issues
 `);

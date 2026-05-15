@@ -8,7 +8,6 @@ import { statusCommand } from "./commands/status.js";
 import { ollamaCommand } from "./commands/ollama.js";
 import { chatCommand, runChat } from "./commands/chat.js";
 import { modelCommand } from "./commands/model.js";
-import { feedbackCommand } from "./commands/feedback.js";
 import { getPackageVersion } from "../utils/version.js";
 import { showBetaBanner } from "../utils/beta-banner.js";
 
@@ -28,13 +27,9 @@ export function createCLI(): Command {
   statusCommand(program);
   ollamaCommand(program);
   modelCommand(program);
-  feedbackCommand(program);
 
-  // Show beta banner before every command (except feedback itself)
-  program.hook("preAction", (_thisCommand, actionCommand) => {
-    if (actionCommand.name() !== "feedback") {
-      showBetaBanner();
-    }
+  program.hook("preAction", () => {
+    showBetaBanner();
   });
 
   // default action: interactive chat when no subcommand is given

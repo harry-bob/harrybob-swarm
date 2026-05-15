@@ -71,3 +71,11 @@ Each task consumes multiple LLM calls:
 - Researcher: 1 call per query
 
 With multiple parallel workers and dual reviewers, this can exhaust cloud API quotas quickly.
+
+## Release & Deployment Rules
+
+**DO NOT auto-push to GitHub or npm.**
+
+- After making code changes, **commit locally** but do **not** `git push` unless the user explicitly asks.
+- After bumping the version, **do not** `npm publish` unless the user explicitly says to.
+- Ask the user for confirmation before any push or publish step.
