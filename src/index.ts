@@ -16,6 +16,9 @@ if (envResult.error) {
 }
 
 import { createCLI } from "./cli/index.js";
+import { showBetaBanner } from "./utils/beta-banner.js";
+
+showBetaBanner();
 
 const cli = createCLI();
 cli.parseAsync(process.argv)

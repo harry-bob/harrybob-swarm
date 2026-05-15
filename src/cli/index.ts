@@ -9,7 +9,6 @@ import { ollamaCommand } from "./commands/ollama.js";
 import { chatCommand, runChat } from "./commands/chat.js";
 import { modelCommand } from "./commands/model.js";
 import { getPackageVersion } from "../utils/version.js";
-import { showBetaBanner } from "../utils/beta-banner.js";
 
 export function createCLI(): Command {
   const program = new Command();
@@ -27,10 +26,6 @@ export function createCLI(): Command {
   statusCommand(program);
   ollamaCommand(program);
   modelCommand(program);
-
-  program.hook("preAction", () => {
-    showBetaBanner();
-  });
 
   // default action: interactive chat when no subcommand is given
   program.action(async () => {
