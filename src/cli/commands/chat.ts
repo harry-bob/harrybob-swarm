@@ -1,8 +1,9 @@
 import { Command } from "commander";
+import { runLogin } from "./login.js";
 import { Orchestrator } from "../../core/orchestrator.js";
 import { loadConfig, saveConfig } from "../../config/config.js";
 import { loadSession } from "../../core/session.js";
-import { promptModelSelection } from "../model-picker.js";
+import { promptModelSelection, promptInteractiveModelSelection } from "../model-picker.js";
 import { TUI } from "../tui.js";
 import { printBetaBanner } from "../../utils/beta-banner.js";
 import chalk from "chalk";
@@ -51,6 +52,63 @@ export async function runChat(config: import("../../config/config.js").SwarmConf
             tui.printInfo(`Files: ${session.filesCreated.join(", ")}`);
           }
           tui.separator();
+          continue;
+        }
+
+        // Login
+        if (tui.isLoginCommand(input)) {
+          tui.suspend();
+          try {
+            await runLogin(config);
+            tui.setModel(config.model);
+            tui.setProvider(config.provider);
+            tui.printSuccess(`Connected to ${config.provider} (${config.model})`);
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            tui.printError(`Login failed: ${msg}`);
+          } finally {
+            tui.unsuspend();
+          }
+          continue;
+        }
+
+        // /model <name> — set model directly via slash command
+        if (tui.isModelSetSlashCommand(input)) {
+          const modelName = tui.parseModelSetSlashCommand(input);
+          if (modelName) {
+            config.model = modelName;
+            await saveConfig(config);
+            tui.setModel(config.model);
+            tui.printSuccess(`Model set to: ${config.model}`);
+          } else {
+            tui.printError("Usage: /model <model-name>");
+          }
+          continue;
+        }
+
+        // Models
+        if (tui.isModelsCommand(input)) {
+          tui.suspend();
+          try {
+            const info = await promptInteractiveModelSelection(config);
+            if (info) {
+              config.provider = info.provider;
+              config.model = info.id;
+              if (info.baseURL) config.baseURL = info.baseURL;
+              else delete config.baseURL;
+              if (info.apiKey) config.apiKey = info.apiKey;
+              else delete config.apiKey;
+              await saveConfig(config);
+              tui.setProvider(config.provider);
+              tui.setModel(config.model);
+              tui.printSuccess(`Switched to ${config.provider} (${config.model})`);
+            }
+          } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            tui.printError(`Model selection failed: ${msg}`);
+          } finally {
+            tui.unsuspend();
+          }
           continue;
         }
 

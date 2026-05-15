@@ -57,4 +57,18 @@ export class OpenAIProvider implements LLMProvider {
       tokenCount: result.usage.completion,
     };
   }
+
+  async listModels(): Promise<string[]> {
+    const response = await fetch(`${this.baseURL}/models`, {
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+    });
+    if (!response.ok) {
+      const error = await response.text();
+      throw new Error(`OpenAI API error: ${response.status} - ${error}`);
+    }
+    const data = await response.json();
+    return (data.data || [])
+      .map((m: { id: string }) => m.id)
+      .sort();
+  }
 }

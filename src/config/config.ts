@@ -8,6 +8,7 @@ export interface SwarmConfig {
   provider: string;
   model: string;
   baseURL?: string;
+  apiKey?: string;
   agents: Record<string, { role: string; systemPrompt: string }>;
   orchestration: {
     maxConcurrentAgents: number;

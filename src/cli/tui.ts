@@ -9,6 +9,9 @@ ${chalk.cyan("║")}  ${chalk.yellow("fix")} <issue>     — fix a bug from the 
 ${chalk.cyan("║")}  ${chalk.yellow("model select")}   — pick a model interactively                ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("model show")}     — show the current model                   ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("model set")} <m>  — set model directly                       ${chalk.cyan("║")}
+${chalk.cyan("║")}  ${chalk.yellow("/model")} <m>    — set model directly (shortcut)            ${chalk.cyan("║")}
+${chalk.cyan("║")}  ${chalk.yellow("/models")}        — pick a model interactively                  ${chalk.cyan("║")}
+${chalk.cyan("║")}  ${chalk.yellow("/login")}         — connect to a different provider             ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("status")}         — show swarm configuration                  ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("clear")}           — clear the screen                         ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("exit")}            — exit interactive mode                    ${chalk.cyan("║")}
@@ -57,6 +60,10 @@ export class TUI {
   private isRendering = false;
   private readonly RENDER_FPS = 30; // ~33 ms
 
+  // ── slash commands ────────────────────────────────────────
+  private readonly slashCommands = ["/login", "/model", "/models"];
+  private slashSelected = 0;
+
   constructor(options: TUIOptions) {
     this.model = options.model;
     this.provider = options.provider;
@@ -99,6 +106,10 @@ export class TUI {
 
   setModel(model: string): void {
     this.model = model;
+  }
+
+  setProvider(provider: string): void {
+    this.provider = provider;
   }
 
   close(): void {
@@ -150,6 +161,9 @@ export class TUI {
     this.addOutput(chalk.yellow("    model select") + "        — Pick a model interactively\n");
     this.addOutput(chalk.yellow("    model show") + "          — Show the current model\n");
     this.addOutput(chalk.yellow("    model set <name>") + "    — Set model directly\n");
+    this.addOutput(chalk.yellow("    /model <name>") + "       — Set model directly (shortcut)\n");
+    this.addOutput(chalk.yellow("    /models") + "             — Pick a model interactively\n");
+    this.addOutput(chalk.yellow("    /login") + "              — Connect to a different provider\n");
     this.addOutput(chalk.yellow("    status") + "              — Show swarm configuration\n");
     this.addOutput(chalk.yellow("    clear") + "               — Clear the screen\n");
     this.addOutput(chalk.yellow("    help") + "                — Show this help\n");
@@ -185,6 +199,56 @@ export class TUI {
 
   parseFixCommand(input: string): string {
     return input.replace(/^fix\s*:?\s*/i, "").trim();
+  }
+
+  isLoginCommand(input: string): boolean {
+    return input.toLowerCase().startsWith("/login");
+  }
+
+  isModelsCommand(input: string): boolean {
+    return input.toLowerCase().startsWith("/models");
+  }
+
+  isModelSetSlashCommand(input: string): boolean {
+    const trimmed = input.trim();
+    return trimmed.toLowerCase().startsWith("/model ") || trimmed.toLowerCase() === "/model";
+  }
+
+  parseModelSetSlashCommand(input: string): string | null {
+    const trimmed = input.trim();
+    const parts = trimmed.split(/\s+/);
+    if (parts.length < 2) return null;
+    return parts.slice(1).join(" ");
+  }
+
+  private getSlashSuggestions(): string[] {
+    if (!this.inputBuffer.startsWith("/")) return [];
+    return this.slashCommands.filter((cmd) => cmd.startsWith(this.inputBuffer));
+  }
+
+  private getSlashSelected(): number {
+    const suggestions = this.getSlashSuggestions();
+    if (suggestions.length === 0) return -1;
+    this.slashSelected = Math.max(0, Math.min(this.slashSelected, suggestions.length - 1));
+    return this.slashSelected;
+  }
+
+  private applySlashCompletion(): boolean {
+    const suggestions = this.getSlashSuggestions();
+    if (suggestions.length === 0) return false;
+    const sel = this.getSlashSelected();
+    this.inputBuffer = suggestions[sel] + " ";
+    this.slashSelected = 0;
+    return true;
+  }
+
+  private describeSlashCommand(cmd: string): string {
+    switch (cmd) {
+      case "/login": return "connect to a different provider";
+      case "/model": return "set model directly";
+      case "/models": return "pick a model interactively";
+      default: return "";
+    }
   }
 
   isHelp(input: string): boolean {
@@ -336,7 +400,10 @@ export class TUI {
 
     const rows = process.stdout.rows || 24;
     const cols = process.stdout.columns || 80;
-    const reserved = 2;               // separator + input line
+    const suggestions = this.inputMode === "input" && this.inputBuffer.startsWith("/") ? this.getSlashSuggestions() : [];
+    const hasSlashSuggestions = suggestions.length > 0;
+    const suggestionRows = hasSlashSuggestions ? suggestions.length + 1 : 0; // label + one row per suggestion
+    const reserved = 2 + suggestionRows;               // suggestions + separator + input line
     const outputHeight = Math.max(1, rows - reserved);
 
     const all = [...this.buffer];
@@ -365,6 +432,21 @@ export class TUI {
         }
       }
       frame += "\n";
+    }
+
+    // ── slash suggestions ──────────────────────────────────
+    if (hasSlashSuggestions) {
+      const selectedIdx = this.getSlashSelected();
+      frame += "\x1b[0m\x1b[2K";
+      frame += chalk.gray("  Commands:");
+      frame += "\n";
+      for (let i = 0; i < suggestions.length; i++) {
+        frame += "\x1b[0m\x1b[2K";
+        const prefix = i === selectedIdx ? chalk.green("  > ") : "     ";
+        const desc = this.describeSlashCommand(suggestions[i]);
+        frame += prefix + chalk.yellow(suggestions[i]) + chalk.gray(` — ${desc}`);
+        frame += "\n";
+      }
     }
 
     // ── separator ───────────────────────────────────────────
@@ -426,7 +508,20 @@ export class TUI {
   // ═══════════════════════════════════════════════════════════
 
   private handleEscapeSequence(seq: string): boolean {
-    // Arrow / scroll keys
+    // Arrow / scroll keys — hijack Up/Down for slash suggestions
+    if (this.inputMode === "input" && this.inputBuffer.startsWith("/") && this.getSlashSuggestions().length > 0) {
+      const suggestions = this.getSlashSuggestions();
+      if (seq === "\x1b[A" || seq === "\x1bOA") {
+        this.slashSelected = Math.max(0, this.slashSelected - 1);
+        this.scheduleRender();
+        return true;
+      }
+      if (seq === "\x1b[B" || seq === "\x1bOB") {
+        this.slashSelected = Math.min(suggestions.length - 1, this.slashSelected + 1);
+        this.scheduleRender();
+        return true;
+      }
+    }
     if (seq === "\x1b[A" || seq === "\x1bOA") {
       this.scrollUp(3);
       return true;
@@ -591,6 +686,7 @@ export class TUI {
       if (code === 127 || code === 8) {
         if (this.inputMode === "input" && this.inputBuffer.length > 0) {
           this.inputBuffer = this.inputBuffer.slice(0, -1);
+          this.slashSelected = 0;
           if (this.inputBuffer.length === 0) this.pasteMode = false;
         }
         pending = pending.slice(1);
@@ -600,6 +696,14 @@ export class TUI {
 
       // Tab
       if (code === 9) {
+        if (this.inputMode === "input" && this.inputBuffer.startsWith("/")) {
+          if (this.applySlashCompletion()) {
+            this.scrollToBottom();
+            pending = pending.slice(1);
+            this.scheduleRender();
+            continue;
+          }
+        }
         if (this.inputMode === "input") {
           this.inputBuffer += "\t";
         }
@@ -625,6 +729,7 @@ export class TUI {
       // Normal printable character
       if (this.inputMode === "input") {
         this.inputBuffer += ch;
+        this.slashSelected = 0;
         this.scrollToBottom();
       }
       pending = pending.slice(1);
@@ -644,6 +749,19 @@ export class TUI {
   private printModelInfo(): void {
     this.addOutput(chalk.gray(`  Model: ${this.model}  │  Provider: ${this.provider}`) + "\n");
   }
+}
+
+/** Longest common prefix of an array of strings. */
+function longestCommonPrefix(strings: string[]): string {
+  if (strings.length === 0) return "";
+  let prefix = strings[0];
+  for (let i = 1; i < strings.length; i++) {
+    while (!strings[i].startsWith(prefix)) {
+      prefix = prefix.slice(0, -1);
+      if (prefix === "") return "";
+    }
+  }
+  return prefix;
 }
 
 // ── ANSI helpers ─────────────────────────────────────────────

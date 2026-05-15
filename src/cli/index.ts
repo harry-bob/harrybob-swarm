@@ -7,6 +7,7 @@ import { fixCommand } from "./commands/fix.js";
 import { statusCommand } from "./commands/status.js";
 import { ollamaCommand } from "./commands/ollama.js";
 import { chatCommand, runChat } from "./commands/chat.js";
+import { loginCommand } from "./commands/login.js";
 import { modelCommand } from "./commands/model.js";
 import { getPackageVersion } from "../utils/version.js";
 
@@ -25,6 +26,7 @@ export function createCLI(): Command {
   chatCommand(program);
   statusCommand(program);
   ollamaCommand(program);
+  loginCommand(program);
   modelCommand(program);
 
   // default action: interactive chat when no subcommand is given

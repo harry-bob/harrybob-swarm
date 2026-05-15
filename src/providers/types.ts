@@ -31,4 +31,5 @@ export interface LLMProvider {
   name: string;
   chat(options: ChatOptions): Promise<ChatResponse>;
   chatStream(options: ChatOptions): AsyncIterable<StreamChunk>;
+  listModels(): Promise<string[]>;
 }

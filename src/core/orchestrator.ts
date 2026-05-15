@@ -13,6 +13,8 @@ interface SwarmConfig {
   version: string;
   provider: string;
   model: string;
+  baseURL?: string;
+  apiKey?: string;
   agents: Record<string, { role: string; systemPrompt: string }>;
   orchestration: {
     maxConcurrentAgents: number;
@@ -186,7 +188,11 @@ export class Orchestrator {
 
   constructor(config: SwarmConfig) {
     this.config = config;
-    this.provider = createProvider(config.provider, config.model);
+    this.provider = createProvider(config.provider, {
+      model: config.model,
+      baseURL: config.baseURL,
+      apiKey: config.apiKey,
+    });
     this.sandbox = new Sandbox(process.cwd());
   }
 
