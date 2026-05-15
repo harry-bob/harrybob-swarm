@@ -9,6 +9,7 @@
   },
   "files": [
     "dist/",
+    "scripts/",
     "README.md",
     "AGENT.md"
   ],
@@ -18,7 +19,8 @@
     "dev": "tsx src/index.ts",
     "start": "node dist/index.js",
     "test": "vitest",
-    "lint": "eslint src/"
+    "lint": "eslint src/",
+    "postinstall": "node scripts/postinstall.mjs"
   },
   "keywords": [
     "cli",
