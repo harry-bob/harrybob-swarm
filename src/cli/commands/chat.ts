@@ -4,6 +4,7 @@ import { loadConfig, saveConfig } from "../../config/config.js";
 import { loadSession } from "../../core/session.js";
 import { promptModelSelection } from "../model-picker.js";
 import { TUI } from "../tui.js";
+import { printBetaBanner } from "../../utils/beta-banner.js";
 import chalk from "chalk";
 
 export async function runChat(config: import("../../config/config.js").SwarmConfig, options?: { model?: string }): Promise<void> {
@@ -12,11 +13,10 @@ export async function runChat(config: import("../../config/config.js").SwarmConf
   const tui = new TUI({
     model: config.model,
     provider: config.provider,
+    onEnter: printBetaBanner,
   });
 
-
-
-      for await (const input of tui.prompt()) {
+  for await (const input of tui.prompt()) {
         // Skip empty input
         if (!input) continue;
 

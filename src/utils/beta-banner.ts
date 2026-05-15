@@ -32,9 +32,8 @@ function recordShown(): void {
   }
 }
 
-export function showBetaBanner(): void {
-  if (!shouldShow()) return;
-
+/** Print the beta banner unconditionally (no cooldown). */
+export function printBetaBanner(): void {
   console.log();
   console.log(chalk.yellow("╔══════════════════════════════════════════════════════════════╗"));
   console.log(chalk.yellow("║  🐝  BETA RELEASE — Your feedback shapes Swarm!              ║"));
@@ -47,6 +46,11 @@ export function showBetaBanner(): void {
   console.log(chalk.yellow("║  Set SWARM_NO_BETA_BANNER=1 to hide this banner              ║"));
   console.log(chalk.yellow("╚══════════════════════════════════════════════════════════════╝"));
   console.log();
+}
 
+/** Show the beta banner with a 24-hour cooldown. */
+export function showBetaBanner(): void {
+  if (!shouldShow()) return;
+  printBetaBanner();
   recordShown();
 }

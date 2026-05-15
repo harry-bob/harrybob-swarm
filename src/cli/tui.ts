@@ -18,6 +18,7 @@ ${chalk.cyan("╚═════════════════════
 export interface TUIOptions {
   model: string;
   provider: string;
+  onEnter?: () => void;
 }
 
 /**
@@ -30,6 +31,8 @@ export interface TUIOptions {
 export class TUI {
   private model: string;
   private provider: string;
+
+  private onEnter?: () => void;
 
   // ── screen state ────────────────────────────────────────────
   private active = false;           // TUI is in alternate screen
@@ -57,6 +60,7 @@ export class TUI {
   constructor(options: TUIOptions) {
     this.model = options.model;
     this.provider = options.provider;
+    this.onEnter = options.onEnter;
 
     // re-render on terminal resize
     process.stdout.on("resize", () => {
@@ -199,6 +203,7 @@ export class TUI {
     this.hijackOutput();
     this.printBanner();
     this.printModelInfo();
+    if (this.onEnter) this.onEnter();
     this.scheduleRender();
   }
 
