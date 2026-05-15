@@ -11,3 +11,7 @@ __pycache__/
 # Benchmarks (not part of the main project)
 swebench/
 humaneval/
+
+# Internal agent docs — not for distribution
+AGENT.md
+src/**/AGENT.md

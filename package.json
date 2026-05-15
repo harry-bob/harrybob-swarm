@@ -10,8 +10,7 @@
   "files": [
     "dist/",
     "scripts/",
-    "README.md",
-    "AGENT.md"
+    "README.md"
   ],
   "scripts": {
     "prepare": "npm run build",
