@@ -48,6 +48,8 @@ export function runCommand(program: Command): void {
         console.log(result.output);
         console.log("=".repeat(60));
         console.log(`⏱  Duration: ${result.duration}ms`);
+        const tu = result.tokenUsage;
+        console.log(`🔧 Tokens: ${tu.prompt + tu.completion + tu.reasoning} total (in: ${tu.prompt}, out: ${tu.completion}, reasoning: ${tu.reasoning})`);
         console.log(`🤖 Agents used: ${result.agentsUsed.join(", ")}`);
         console.log(`🔄 Iterations: ${result.iterations}`);
 

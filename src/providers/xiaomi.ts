@@ -143,6 +143,7 @@ export class XiaomiProvider implements LLMProvider {
       usage: {
         prompt: data.usage?.prompt_tokens || 0,
         completion: data.usage?.completion_tokens || 0,
+        reasoning: data.usage?.completion_tokens_details?.reasoning_tokens || 0,
       },
     };
   }
@@ -177,6 +178,7 @@ export class XiaomiProvider implements LLMProvider {
         { id?: string; name?: string; arguments: string }
       >();
       let finalTokenCount = 0;
+      let finalReasoningCount = 0;
 
       while (true) {
         const { done, value } = await reader.read();
@@ -213,6 +215,9 @@ export class XiaomiProvider implements LLMProvider {
             if (json.usage?.completion_tokens) {
               finalTokenCount = json.usage.completion_tokens;
             }
+            if (json.usage?.completion_tokens_details?.reasoning_tokens) {
+              finalReasoningCount = json.usage.completion_tokens_details.reasoning_tokens;
+            }
 
             yield {
               content: delta.content || undefined,
@@ -238,6 +243,7 @@ export class XiaomiProvider implements LLMProvider {
         tool_calls:
           assembledToolCalls.length > 0 ? assembledToolCalls : undefined,
         tokenCount: finalTokenCount || undefined,
+        reasoningTokens: finalReasoningCount || undefined,
       };
     } finally {
       clearTimeout(timer);

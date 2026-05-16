@@ -130,6 +130,55 @@ const PLAN_FIX_PROMPT = `The task plan you produced has validation errors. Fix t
 
 Errors:`;
 
+// ── Phase 4: Replanning with investigation ────────────────
+
+const REPLANNER_SYSTEM_PROMPT = `You are an expert software architect reviewing progress and adjusting plans.
+
+## Context
+You previously planned a multi-step task. Some subtasks are now complete.
+You have received reviewer feedback on the completed work.
+Your job is to determine if the remaining plan still makes sense, or if it needs adjustment.
+
+## Tools
+- read_file — read file contents to see what was actually built
+- list_files — list files and directories to verify structure
+- run_command — execute shell commands (e.g., "cat package.json", "npm test")
+- web_search — search the web for documentation
+- ask_user_question — ask the user for clarification
+
+## Investigation Protocol
+1. VERIFY COMPLETED WORK: Read the files that were supposed to be created/modified by completed subtasks. Check if they actually exist and contain what was expected.
+2. CHECK DEVIATIONS: Compare what was built vs. what you planned. Note any deviations, missing pieces, or unexpected additions.
+3. REVIEW REVIEWER FEEDBACK: Consider the reviewers' findings — bugs they found, gaps they noted, design issues they raised.
+4. ASSESS REMAINING PLAN: Look at the remaining subtasks. Are they still valid? Do they need to change based on what was actually built?
+5. DECIDE: If the remaining plan is good as-is, say "NO CHANGES".
+   If changes are needed, produce updated remaining subtasks.
+
+## Efficiency Rules
+- Do NOT call the same tool with the same arguments more than once.
+- After listing a directory, read the specific files you need — do not re-list the same directory.
+- After reading a file, do not read it again unless you suspect it changed.
+
+## Output Format
+After your investigation, respond with ONE of:
+1. "NO CHANGES" — if the remaining plan is fine as-is.
+2. A JSON object with updated remaining subtasks:
+{
+  "goal": "same overall goal",
+  "rationale": "why changes were needed based on investigation and reviewer feedback",
+  "subtasks": [
+    {
+      "id": "task-3",
+      "title": "...",
+      "description": "...",
+      "dependencies": ["task-1"],
+      "verification": "...",
+      "filesExpected": ["src/foo.ts"],
+      "estimatedComplexity": "medium"
+    }
+  ]
+}`;
+
 export class ArchitectAgent {
   private provider: LLMProvider;
   private model: string;
@@ -170,6 +219,182 @@ export class ArchitectAgent {
     }
 
     return plan;
+  }
+
+  async replanWithInvestigation(
+    taskDescription: string,
+    plan: TaskPlan,
+    completedIds: string[],
+    results: Record<string, { agentRole: string; output: string }[]>,
+    reviewerFeedbacks: Array<{ report: string; source: string; reviewStatus: string }>
+  ): Promise<TaskPlan | null> {
+    console.log(chalk.magenta("\n🧠 Architect replanning after subtask completion..."));
+
+    const completed = plan.subtasks.filter((s) => completedIds.includes(s.id));
+    const remaining = plan.subtasks.filter((s) => !completedIds.includes(s.id));
+
+    if (remaining.length === 0) return null;
+
+    // Build context prompt
+    const completedSummary = completed
+      .map((s) => {
+        const res = results[s.id] || [];
+        const lastOutput = res[res.length - 1]?.output || "(no output)";
+        const preview = lastOutput.slice(0, 400);
+        return `### ${s.id}: ${s.title}\n${preview}...`;
+      })
+      .join("\n\n");
+
+    const remainingSummary = remaining
+      .map((s) => `- ${s.id}: ${s.title} — ${s.description}`)
+      .join("\n");
+
+    const feedbackBlock = reviewerFeedbacks
+      .map(
+        (fb) =>
+          `REVIEWER: ${fb.source}\nSTATUS: ${fb.reviewStatus}\nREPORT:\n${fb.report}\n`
+      )
+      .join("\n---\n");
+
+    const prompt = `ORIGINAL TASK:\n${taskDescription}\n\nOVERALL GOAL: ${plan.goal}\n\nCOMPLETED SUBTASKS:\n${completedSummary}\n\n${feedbackBlock}\n\nREMAINING SUBTASKS (current plan):\n${remainingSummary}\n\nInvestigate the current state of the project. Read files created by completed subtasks. Assess whether the remaining plan still makes sense. Respond with "NO CHANGES" or an updated JSON plan for remaining subtasks.`;
+
+    const messages: ChatMessage[] = [
+      { role: "system", content: REPLANNER_SYSTEM_PROMPT },
+      { role: "system", content: `Current project directory: ${this.projectDir}` },
+      { role: "user", content: prompt },
+    ];
+
+    const toolDefs = this.tools.getDefinitions();
+    let rounds = 0;
+    let hasUsedTool = false;
+
+    while (rounds < MAX_TOOL_ROUNDS) {
+      rounds++;
+
+      const progressSummary = this.summarizeInvestigationProgress(messages);
+      if (progressSummary) {
+        messages.push({ role: "system", content: progressSummary });
+      }
+
+      const response = await withRetry(
+        () =>
+          this.provider.chat({
+            model: this.model,
+            messages,
+            tools: toolDefs,
+          }),
+        "replan-investigate"
+      );
+
+      if (response.tool_calls && response.tool_calls.length > 0) {
+        hasUsedTool = true;
+        messages.push({
+          role: "assistant",
+          content: response.content || "",
+          tool_calls: response.tool_calls,
+        });
+
+        for (const toolCall of response.tool_calls) {
+          const argsStr = Object.entries(toolCall.arguments)
+            .map(([k, v]) => `${k}: "${String(v).slice(0, 60)}${String(v).length > 60 ? "..." : ""}"`)
+            .join(", ");
+          console.log(chalk.magenta(`[architect] ⚙ ${toolCall.name}(${argsStr})`));
+
+          const cacheKey = `${toolCall.name}:${JSON.stringify(toolCall.arguments)}`;
+          let output: string;
+
+          if (this.CACHEABLE_TOOLS.has(toolCall.name) && this.toolCache.has(cacheKey)) {
+            output = this.toolCache.get(cacheKey)!;
+            console.log(chalk.magenta(`[architect] ⚙ ${toolCall.name}(${argsStr}) ${chalk.gray("[cached]")}`));
+          } else {
+            try {
+              output = await this.tools.execute(toolCall.name, toolCall.arguments);
+            } catch (err: unknown) {
+              output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+            }
+            if (this.CACHEABLE_TOOLS.has(toolCall.name)) {
+              this.toolCache.set(cacheKey, output);
+            }
+          }
+
+          messages.push({
+            role: "user",
+            content: `Tool "${toolCall.name}" result:\n${output}`,
+          });
+        }
+        continue;
+      }
+
+      if (!hasUsedTool) {
+        messages.push({
+          role: "user",
+          content: `Before you can decide, you MUST use tools to investigate the current state. Please use list_files and read_file to check what was actually built. Do not respond without first exploring the project.`,
+        });
+        continue;
+      }
+
+      const content = response.content || "NO CHANGES";
+      console.log(chalk.magenta(`[architect] ✅ Replanning investigation complete (${rounds} round${rounds > 1 ? "s" : ""})`));
+
+      if (content.includes("NO CHANGES")) {
+        console.log(chalk.magenta(`  ⏭  Architect: no changes needed`));
+        return null;
+      }
+
+      // Try to parse JSON plan
+      return this.parseRemainingPlan(content, plan, completedIds);
+    }
+
+    console.log(chalk.yellow(`[architect] ⚠ Hit max tool rounds (${MAX_TOOL_ROUNDS}), keeping original plan`));
+    return null;
+  }
+
+  private parseRemainingPlan(content: string, originalPlan: TaskPlan, completedIds: string[]): TaskPlan | null {
+    try {
+      let jsonStr = content.trim();
+      const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+      if (codeBlockMatch) {
+        jsonStr = codeBlockMatch[1].trim();
+      }
+
+      const parsed = JSON.parse(jsonStr);
+      const validated = TaskPlanSchema.parse(parsed);
+
+      const newSubtasks: Subtask[] = validated.subtasks.map((st, i) => ({
+        id: st.id || `task-${i + 1}`,
+        title: st.title || `Task ${i + 1}`,
+        description: st.description || st.title || "",
+        dependencies: st.dependencies || [],
+        verification: st.verification,
+        filesExpected: st.filesExpected,
+        estimatedComplexity: st.estimatedComplexity,
+      }));
+
+      // Validate: no completed IDs in new subtasks
+      const duplicates = newSubtasks.filter((s) => completedIds.includes(s.id));
+      if (duplicates.length > 0) {
+        console.log(chalk.yellow(`[architect] ⚠ Replan tried to overwrite completed subtask(s): ${duplicates.map((d) => d.id).join(", ")} — filtering out`));
+      }
+
+      const validNew = newSubtasks.filter((s) => !completedIds.includes(s.id));
+      const keptSubtasks = originalPlan.subtasks.filter((s) => completedIds.includes(s.id));
+
+      if (validNew.length === 0) return null;
+
+      return {
+        goal: validated.goal || originalPlan.goal,
+        rationale: validated.rationale || originalPlan.rationale,
+        subtasks: [...keptSubtasks, ...validNew],
+      };
+    } catch (err) {
+      if (err && typeof err === "object" && "issues" in err) {
+        const issues = (err as any).issues.map((e: any) => `${e.path.join(".")}: ${e.message}`).join(", ");
+        console.log(chalk.yellow(`[architect] ⚠ Replan parse/validation failed: ${issues}`));
+      } else {
+        console.log(chalk.yellow(`[architect] ⚠ Could not parse replan response — keeping original plan`));
+      }
+      return null;
+    }
   }
 
   async replan(prompt: string): Promise<string> {
@@ -295,13 +520,7 @@ export class ArchitectAgent {
       { role: "user", content: prompt },
     ];
 
-    const response = await withRetry(() => this.provider.chat({
-      model: this.model,
-      messages,
-      responseFormat: { type: "json_object" },
-    }), "plan");
-
-    return this.parsePlan(response.content || "", taskDescription);
+    return this.chatAndParsePlan(messages, "plan");
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -395,61 +614,85 @@ export class ArchitectAgent {
       { role: "user", content: prompt },
     ];
 
-    const response = await withRetry(() => this.provider.chat({
-      model: this.model,
-      messages,
-      responseFormat: { type: "json_object" },
-    }), "fix-plan");
-
-    return this.parsePlan(response.content || "", taskDescription);
+    return this.chatAndParsePlan(messages, "fix-plan");
   }
 
   // ═══════════════════════════════════════════════════════════
   //  Utilities
   // ═══════════════════════════════════════════════════════════
 
-  private parsePlan(content: string, fallback: string): TaskPlan {
-    try {
-      let jsonStr = content.trim();
-      const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (codeBlockMatch) {
-        jsonStr = codeBlockMatch[1].trim();
+  private async chatAndParsePlan(
+    messages: ChatMessage[],
+    label: string
+  ): Promise<TaskPlan> {
+    let attempts = 0;
+    const maxParseAttempts = 3;
+    let lastError = "";
+
+    while (attempts < maxParseAttempts) {
+      attempts++;
+      const response = await withRetry(
+        () =>
+          this.provider.chat({
+            model: this.model,
+            messages,
+            responseFormat: { type: "json_object" },
+          }),
+        label
+      );
+
+      const content = response.content || "";
+
+      try {
+        return this.parsePlan(content);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        lastError = msg;
+        console.log(
+          chalk.yellow(
+            `[architect] ⚠ Plan parse/validation failed (attempt ${attempts}/${maxParseAttempts}): ${msg.slice(0, 120)}`
+          )
+        );
+
+        if (attempts >= maxParseAttempts) break;
+
+        // Re-engage architect with error details
+        messages.push({ role: "assistant", content });
+        messages.push({
+          role: "user",
+          content: `Your response could not be parsed as a valid task plan.\n\nErrors:\n${msg}\n\nPlease fix the errors and return ONLY a corrected JSON object matching the required schema. Do not include markdown fences, preamble, or commentary.`,
+        });
       }
-
-      const parsed = JSON.parse(jsonStr);
-      const validated = TaskPlanSchema.parse(parsed);
-
-      const subtasks: Subtask[] = validated.subtasks.map((st, i) => ({
-        id: st.id || `task-${i + 1}`,
-        title: st.title || `Task ${i + 1}`,
-        description: st.description || st.title || "",
-        dependencies: st.dependencies || [],
-        verification: st.verification,
-        filesExpected: st.filesExpected,
-        estimatedComplexity: st.estimatedComplexity,
-      }));
-
-      return {
-        goal: validated.goal,
-        rationale: validated.rationale,
-        subtasks,
-      };
-    } catch (err) {
-      if (err && typeof err === "object" && "issues" in err) {
-        const issues = (err as any).issues.map((e: any) => `${e.path.join(".")}: ${e.message}`).join(", ");
-        console.log(chalk.yellow(`[architect] ⚠ Plan validation failed: ${issues}`));
-      }
-      return {
-        goal: fallback,
-        rationale: "Fallback plan due to parse/validation error",
-        subtasks: [{
-          id: "task-1",
-          title: "Implement task",
-          description: fallback,
-          dependencies: [],
-        }],
-      };
     }
+
+    throw new Error(`Failed to parse plan after ${maxParseAttempts} attempts. Last error: ${lastError}`);
+  }
+
+  private parsePlan(content: string): TaskPlan {
+    let jsonStr = content.trim();
+    const codeBlockMatch = jsonStr.match(/```(?:json)?\s*([\s\S]*?)```/);
+    if (codeBlockMatch) {
+      jsonStr = codeBlockMatch[1].trim();
+    }
+
+    const parsed = JSON.parse(jsonStr);
+    const validated = TaskPlanSchema.parse(parsed);
+
+    const subtasks: Subtask[] = validated.subtasks.map((st, i) => ({
+      id: st.id || `task-${i + 1}`,
+      title: st.title || `Task ${i + 1}`,
+      description: st.description || st.title || "",
+      dependencies: st.dependencies || [],
+      verification: st.verification,
+      filesExpected: st.filesExpected,
+      estimatedComplexity: st.estimatedComplexity,
+    }));
+
+    return {
+      goal: validated.goal,
+      rationale: validated.rationale,
+      subtasks,
+    };
   }
 
   private detectCycle(subtasks: Subtask[]): boolean {

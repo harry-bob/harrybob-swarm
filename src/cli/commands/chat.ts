@@ -4,7 +4,7 @@ import { runLogin } from "./login.js";
 import { Orchestrator } from "../../core/orchestrator.js";
 import { loadConfig, saveConfig } from "../../config/config.js";
 import { loadSession } from "../../core/session.js";
-import { promptModelSelection, promptInteractiveModelSelection } from "../model-picker.js";
+import { promptInteractiveModelSelection } from "../model-picker.js";
 import { TUI } from "../tui.js";
 import { printBetaBanner } from "../../utils/beta-banner.js";
 import chalk from "chalk";
@@ -127,41 +127,6 @@ export async function runChat(config: import("../../config/config.js").SwarmConf
           continue;
         }
 
-        // Model commands
-        if (tui.isModelCommand(input)) {
-          const cmd = tui.parseModelCommand(input);
-          switch (cmd.action) {
-            case "select": {
-              tui.suspend();
-              const choice = await promptModelSelection(config.model, config.baseURL);
-              tui.unsuspend();
-              config.model = choice.model;
-              if (choice.baseURL) config.baseURL = choice.baseURL;
-              await saveConfig(config);
-              tui.setModel(config.model);
-              tui.printSuccess(`Model set to: ${config.model}`);
-              break;
-            }
-            case "set": {
-              if (cmd.arg) {
-                config.model = cmd.arg;
-                await saveConfig(config);
-                tui.setModel(config.model);
-                tui.printSuccess(`Model set to: ${config.model}`);
-              } else {
-                tui.printError("Usage: model set <model-name>");
-              }
-              break;
-            }
-            case "show":
-              tui.printInfo(`Current model: ${chalk.bold(config.model)}`);
-              break;
-            default:
-              tui.printError("Unknown model command. Use: model select, model set <name>, model show");
-          }
-          continue;
-        }
-
         // ── Run or Fix ──────────────────────────────────────────
         tui.separator();
         tui.printUser(input);
@@ -202,7 +167,8 @@ export async function runChat(config: import("../../config/config.js").SwarmConf
             }
           }
           const durationSec = (result.duration / 1000).toFixed(1);
-          tui.printSystem(`⏱  ${durationSec}s │ 🔧 ${result.tokenUsage.prompt + result.tokenUsage.completion} tokens`);
+          const tu = result.tokenUsage;
+          tui.printSystem(`⏱  ${durationSec}s │ 🔧 ${tu.prompt + tu.completion + tu.reasoning} tokens (in: ${tu.prompt}, out: ${tu.completion}, reasoning: ${tu.reasoning})`);
           tui.separator();
         } catch (error: unknown) {
           const msg = error instanceof Error ? error.message : String(error);

@@ -114,6 +114,7 @@ export class OllamaProvider implements LLMProvider {
         usage: {
           prompt: data.prompt_eval_count || 0,
           completion: data.eval_count || 0,
+          reasoning: 0,
         },
       };
     } catch (err) {
@@ -187,6 +188,7 @@ export class OllamaProvider implements LLMProvider {
               tool_calls: toolCalls,
               done: json.done || false,
               tokenCount: json.eval_count || undefined,
+              reasoningTokens: 0,
               durationNs: json.eval_duration || undefined,
             };
           } catch {
@@ -218,6 +220,7 @@ export class OllamaProvider implements LLMProvider {
             tool_calls: toolCalls,
             done: json.done || false,
             tokenCount: json.eval_count || undefined,
+            reasoningTokens: 0,
             durationNs: json.eval_duration || undefined,
           };
         } catch {

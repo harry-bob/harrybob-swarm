@@ -23,6 +23,7 @@ export interface AgentResult {
   tokenUsage: {
     prompt: number;
     completion: number;
+    reasoning: number;
   };
   duration: number;
 }

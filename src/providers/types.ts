@@ -24,6 +24,7 @@ export interface ChatResponse {
   usage: {
     prompt: number;
     completion: number;
+    reasoning: number;
   };
 }
 

@@ -6,11 +6,16 @@ function askUser(promptText: string): Promise<string> {
   return new Promise((resolve) => {
     const rl = readline.createInterface({
       input: process.stdin,
-      output: process.stderr, // write prompt to stderr so stdout stays clean for piping
+      output: process.stderr,
     });
 
-    console.error(chalk.green(`\n💬 Architect asks: ${promptText}`));
-    console.error(chalk.gray("Your answer: "));
+    rl.on("SIGINT", () => {
+      rl.close();
+      resolve("");
+    });
+
+    process.stderr.write(chalk.green(`\n💬 Architect asks: ${promptText}\n`));
+    process.stderr.write(chalk.gray("Your answer: "));
 
     rl.question("", (answer) => {
       rl.close();

@@ -6,9 +6,6 @@ ${chalk.cyan("║")}  ${chalk.bold("🐝 SWARM")} ${chalk.gray("— Interactive 
 ${chalk.cyan("╠══════════════════════════════════════════════════════════════════╣")}
 ${chalk.cyan("║")}  Type a task to create something                                ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("fix")} <issue>     — fix a bug from the previous task            ${chalk.cyan("║")}
-${chalk.cyan("║")}  ${chalk.yellow("model select")}   — pick a model interactively                ${chalk.cyan("║")}
-${chalk.cyan("║")}  ${chalk.yellow("model show")}     — show the current model                   ${chalk.cyan("║")}
-${chalk.cyan("║")}  ${chalk.yellow("model set")} <m>  — set model directly                       ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("/model")} <m>    — set model directly (shortcut)            ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("/models")}        — pick a model interactively                  ${chalk.cyan("║")}
 ${chalk.cyan("║")}  ${chalk.yellow("/login")}         — connect to a different provider             ${chalk.cyan("║")}
@@ -49,11 +46,11 @@ export class TUI {
   // ── input state ─────────────────────────────────────────────
   private inputMode: "input" | "output" | "external" = "output";
   private inputResolve: ((value: string | null) => void) | null = null;
-  private savedMode: "input" | "output" | null = null;
+  private savedMode: "input" | "output" | "external" | null = null;
 
   // ── original I/O hooks ─────────────────────────────────────
-  private origStdoutWrite: typeof process.stdout.write;
-  private origStderrWrite: typeof process.stderr.write;
+  private origStdoutWrite?: typeof process.stdout.write;
+  private origStderrWrite?: typeof process.stderr.write;
 
   // ── render throttling ────────────────────────────────────────
   private renderTimer: ReturnType<typeof setTimeout> | null = null;
@@ -83,6 +80,15 @@ export class TUI {
     process.on("swarm::interactivePromptEnd" as any, () => {
       if (self.suspended) self.unsuspend();
     });
+
+    // Emergency cleanup: restore alternate screen if killed by signal
+    const onSignal = () => {
+      self.leave();
+      process.exit(0);
+    };
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+    process.once("SIGHUP", onSignal);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -113,7 +119,7 @@ export class TUI {
   }
 
   close(): void {
-    // goodbye is drawn by leave()
+    this.leave();
   }
 
   clear(): void {
@@ -158,9 +164,6 @@ export class TUI {
     this.addOutput("\n" + chalk.bold("  Commands:") + "\n");
     this.addOutput(chalk.yellow("    <task>") + "              — Run a new task\n");
     this.addOutput(chalk.yellow("    fix <issue>") + "         — Fix a bug from the previous task\n");
-    this.addOutput(chalk.yellow("    model select") + "        — Pick a model interactively\n");
-    this.addOutput(chalk.yellow("    model show") + "          — Show the current model\n");
-    this.addOutput(chalk.yellow("    model set <name>") + "    — Set model directly\n");
     this.addOutput(chalk.yellow("    /model <name>") + "       — Set model directly (shortcut)\n");
     this.addOutput(chalk.yellow("    /models") + "             — Pick a model interactively\n");
     this.addOutput(chalk.yellow("    /login") + "              — Connect to a different provider\n");
@@ -182,15 +185,6 @@ export class TUI {
 
   isStatus(input: string): boolean {
     return input.toLowerCase() === "status";
-  }
-
-  isModelCommand(input: string): boolean {
-    return input.toLowerCase().startsWith("model");
-  }
-
-  parseModelCommand(input: string): { action: string; arg?: string } {
-    const parts = input.toLowerCase().split(/\s+/);
-    return { action: parts[1] || "show", arg: parts[2] };
   }
 
   isFixCommand(input: string): boolean {
@@ -273,13 +267,19 @@ export class TUI {
 
   /** Restore normal terminal screen and stop capturing. */
   private leave(): void {
-    this.addOutput(chalk.gray("\n  Goodbye! 🐝\n"));
-    this.render(true);
-
+    if (this.origStdoutWrite) {
+      this.addOutput(chalk.gray("\n  Goodbye! 🐝\n"));
+      this.render(true);
+    }
     this.stopStdin();
     this.active = false;
+    this.suspended = false;
     this.restoreOutput();
-    process.stdout.write("\x1b[?1049l");   // normal screen
+    if (this.origStdoutWrite) {
+      this.origStdoutWrite("\x1b[?1049l");
+      this.origStdoutWrite = undefined;
+      this.origStderrWrite = undefined;
+    }
   }
 
   /**
@@ -300,7 +300,11 @@ export class TUI {
     this.suspended = true;
     this.active = false;
     this.restoreOutput();
-    this.origStdoutWrite("\x1b[?1049l");
+    // Give external prompts a clean slate inside the alternate screen
+    if (this.origStdoutWrite) {
+      this.origStdoutWrite("\x1b[2J\x1b[H"); // clear + home
+      this.origStdoutWrite("\x1b[?25h");      // ensure cursor is visible
+    }
   }
 
   /** Resume interception after an external prompt finishes. */
@@ -310,9 +314,6 @@ export class TUI {
 
     this.hijackOutput();
     this.active = true;
-
-    this.origStdoutWrite("\x1b[?1049h");
-    this.origStdoutWrite("\x1b[2J\x1b[H");
 
     this.inputMode = this.savedMode || "output";
     this.startStdin();
@@ -325,8 +326,10 @@ export class TUI {
   // ═══════════════════════════════════════════════════════════
 
   private hijackOutput(): void {
-    this.origStdoutWrite = process.stdout.write.bind(process.stdout);
-    this.origStderrWrite = process.stderr.write.bind(process.stderr);
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    this.origStdoutWrite = origOut;
+    this.origStderrWrite = origErr;
 
     const self = this;
     process.stdout.write = function (
@@ -334,7 +337,7 @@ export class TUI {
       encoding?: any,
       callback?: any
     ): boolean {
-      if (!self.active) return self.origStdoutWrite(chunk, encoding, callback);
+      if (!self.active) return origOut(chunk, encoding, callback);
       self.ingest(String(chunk));
       return true;
     };
@@ -344,7 +347,7 @@ export class TUI {
       encoding?: any,
       callback?: any
     ): boolean {
-      if (!self.active) return self.origStderrWrite(chunk, encoding, callback);
+      if (!self.active) return origErr(chunk, encoding, callback);
       self.ingest(String(chunk));
       return true;
     };
@@ -364,6 +367,7 @@ export class TUI {
 
     this.pendingLine = lines.pop() ?? "";
 
+    const newLineCount = lines.length;
     for (const line of lines) {
       this.buffer.push(line);
     }
@@ -372,8 +376,12 @@ export class TUI {
       this.buffer = this.buffer.slice(-5000);
     }
 
-    // new output snaps scroll to bottom
-    this.scrollOffset = 0;
+    // If user scrolled up, keep their view locked on the same old content
+    // by increasing scrollOffset so new text doesn't push old text up.
+    if (this.scrollOffset > 0 && newLineCount > 0) {
+      this.scrollOffset += newLineCount;
+    }
+
     this.scheduleRender();
   }
 
@@ -397,6 +405,11 @@ export class TUI {
     if (!this.active && !force) return;
     if (this.isRendering) return;
     this.isRendering = true;
+
+    if (!this.origStdoutWrite) {
+      this.isRendering = false;
+      return;
+    }
 
     const rows = process.stdout.rows || 24;
     const cols = process.stdout.columns || 80;
@@ -595,7 +608,7 @@ export class TUI {
     stdin.resume();
     stdin.setEncoding("utf8");
     stdin.on("data", this.onStdinData);
-    this.origStdoutWrite("\x1b[?2004h");
+    if (this.origStdoutWrite) this.origStdoutWrite("\x1b[?2004h");
   }
 
   private stopStdin(): void {
@@ -605,7 +618,7 @@ export class TUI {
     }
     stdin.pause();
     stdin.removeAllListeners("data");
-    this.origStdoutWrite("\x1b[?2004l");
+    if (this.origStdoutWrite) this.origStdoutWrite("\x1b[?2004l");
   }
 
   private readonly onStdinData = (data: string): void => {
@@ -715,7 +728,7 @@ export class TUI {
       // Control characters
       if (code < 32) {
         if (code === 3) {
-          this.stopStdin();
+          this.leave();
           process.exit(0);
         }
         if (code === 4 && this.inputMode === "input") {

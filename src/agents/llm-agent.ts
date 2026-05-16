@@ -82,7 +82,7 @@ export class LLMAgent extends BaseAgent {
    * Continue the existing conversation by adding a new user message.
    * Returns the agent's response (final text after all tool calls).
    */
-  async continueChat(userMessage: string): Promise<{ output: string; tokenUsage: { prompt: number; completion: number } }> {
+  async continueChat(userMessage: string): Promise<{ output: string; tokenUsage: { prompt: number; completion: number; reasoning: number } }> {
     // Only add user message if it's not empty
     if (userMessage.trim()) {
       this.history.push({ role: "user", content: userMessage });
@@ -177,12 +177,13 @@ export class LLMAgent extends BaseAgent {
 
     this.history = compacted;
   }
-  private async runLoop(): Promise<{ output: string; tokenUsage: { prompt: number; completion: number } }> {
+  private async runLoop(): Promise<{ output: string; tokenUsage: { prompt: number; completion: number; reasoning: number } }> {
     const toolDefs = this.tools.getDefinitions();
     const roleTag = chalk.cyan(`[${this.config.role}]`);
 
     let totalPrompt = 0;
     let totalCompletion = 0;
+    let totalReasoning = 0;
     let finalContent = "";
 
     while (true) {
@@ -194,6 +195,7 @@ export class LLMAgent extends BaseAgent {
       let thinking = "";
       let toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[] | undefined;
       let evalCount = 0;
+      let reasoningCount = 0;
       let thinkingActive = false;
       let contentActive = false;
       let tokenCount = 0;
@@ -247,6 +249,7 @@ export class LLMAgent extends BaseAgent {
           if (chunk.done) {
             if (thinkingActive) thinkingActive = false;
             if (chunk.tokenCount) evalCount = chunk.tokenCount;
+            if (chunk.reasoningTokens) reasoningCount = chunk.reasoningTokens;
           }
         }
       }, "LLM stream", roleTag);
@@ -264,6 +267,7 @@ export class LLMAgent extends BaseAgent {
       }
 
       totalCompletion += evalCount || tokenCount;
+      totalReasoning += reasoningCount;
 
       // ── No tool calls → done ─────────────────────────────────
       if (!toolCalls || toolCalls.length === 0) {
@@ -336,7 +340,7 @@ export class LLMAgent extends BaseAgent {
 
     return {
       output: finalContent,
-      tokenUsage: { prompt: totalPrompt, completion: totalCompletion },
+      tokenUsage: { prompt: totalPrompt, completion: totalCompletion, reasoning: totalReasoning },
     };
   }
 }

@@ -33,7 +33,7 @@ interface RunResult {
   duration: number;
   agentsUsed: string[];
   iterations: number;
-  tokenUsage: { prompt: number; completion: number };
+  tokenUsage: { prompt: number; completion: number; reasoning: number };
   plan?: TaskPlan;
 }
 
@@ -230,7 +230,7 @@ export class Orchestrator {
     console.log(chalk.blue.bold("⚡ PHASE 2: EXECUTION"));
     console.log(chalk.blue(`${"─".repeat(60)}`));
 
-    const subtaskResults = await this.executePipeline(taskDescription, plan, architect, architectTools);
+    const subtaskResults = await this.executePipeline(taskDescription, plan, architect);
 
     // ── Phase 3: Summary ──────────────────────────────────────
     const duration = Date.now() - startTime;
@@ -240,8 +240,9 @@ export class Orchestrator {
       (acc, r) => ({
         prompt: acc.prompt + r.tokenUsage.prompt,
         completion: acc.completion + r.tokenUsage.completion,
+        reasoning: acc.reasoning + r.tokenUsage.reasoning,
       }),
-      { prompt: 0, completion: 0 }
+      { prompt: 0, completion: 0, reasoning: 0 }
     );
 
     const completedIds = Object.keys(subtaskResults);
@@ -291,8 +292,7 @@ export class Orchestrator {
   private async executePipeline(
     taskDescription: string,
     plan: TaskPlan,
-    architect: ArchitectAgent,
-    architectTools: ToolRegistry
+    architect: ArchitectAgent
   ): Promise<Record<string, AgentResult[]>> {
     const results: Record<string, AgentResult[]> = {};
     const completed = new Set<string>();
@@ -322,8 +322,7 @@ export class Orchestrator {
             failed,
             reviewRounds,
             taskDescription,
-            architect,
-            architectTools
+            architect
           );
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -337,8 +336,9 @@ export class Orchestrator {
   }
 
   /**
-   * Process a single subtask: coder → parallel reviewers → consensus → next subtask.
-   * After both reviewers finish, the orchestrator adjusts the plan based on their reports.
+   * Process a single subtask: coder → parallel reviewers → architect replan → done.
+   * The architect investigates the current state and adjusts the remaining plan
+   * before this method returns, ensuring the next subtask starts with an up-to-date plan.
    */
   private async processSubtask(
     subtask: Subtask,
@@ -348,8 +348,7 @@ export class Orchestrator {
     failed: Set<string>,
     reviewRounds: Map<string, number>,
     taskDescription: string,
-    architect: ArchitectAgent,
-    architectTools: ToolRegistry
+    architect: ArchitectAgent
   ): Promise<void> {
     const cache = new FileCache();
     const coderConfig = this.config.agents.coder;
@@ -407,9 +406,9 @@ export class Orchestrator {
 
     // Stubborn retry: coder must actually modify files
     let stubbornRetries = 0;
-    while (!coder.hasModifiedFiles() && stubbornRetries < 5) {
+    while (!coder.hasModifiedFiles() && stubbornRetries < 2) {
       stubbornRetries++;
-      console.log(chalk.yellow(`  │ ⚠ No files modified — stubborn retry ${stubbornRetries}/5`));
+      console.log(chalk.yellow(`  │ ⚠ No files modified — stubborn retry ${stubbornRetries}/2`));
       const stubbornResult = await coder.continueChat(
         `IMPORTANT: You have not yet created or modified any files. You MUST use write_file, edit_file, or run_command to implement this task. Empty responses are not acceptable. Please implement the task now.`
       );
@@ -422,10 +421,50 @@ export class Orchestrator {
       });
     }
 
+    if (!coder.hasModifiedFiles()) {
+      console.log(chalk.red(`  │ ❌ Coder failed to modify files after ${stubbornRetries} retries. Notifying architect to modify plan...`));
+
+      const failureFeedback = {
+        report: `The coder was unable to create or modify any files for subtask "${subtask.title}" (${subtask.id}) after ${stubbornRetries} attempts. The task description or expected files may need to be revised, or the subtask may need to be broken down into smaller steps.`,
+        source: `Coder auto-failure for ${subtask.id}`,
+        reviewStatus: "NEEDS_WORK",
+      };
+
+      console.log(chalk.magenta(`  🔄 Architect reviewing coder failure before next subtask...`));
+      const newPlan = await architect.replanWithInvestigation(
+        taskDescription,
+        plan,
+        [...completed],
+        Object.fromEntries(
+          Object.entries(results).map(([k, v]) => [k, v.map((r) => ({ agentRole: r.agentRole, output: r.output }))])
+        ),
+        [failureFeedback]
+      );
+
+      if (newPlan) {
+        plan.subtasks = newPlan.subtasks;
+        if (newPlan.rationale) plan.rationale = newPlan.rationale;
+        console.log(chalk.magenta(`  ✅ Plan updated by architect after coder failure`));
+        const updatedRemaining = plan.subtasks.filter((s) => !completed.has(s.id) && s.id !== subtask.id);
+        for (const s of updatedRemaining) {
+          const files = s.filesExpected ? chalk.gray(` 📄 ${s.filesExpected.join(", ")}`) : "";
+          console.log(chalk.magenta(`     └─ ${s.id}: ${s.title}${files}`));
+        }
+      } else {
+        console.log(chalk.magenta(`  ⏭  Architect: sticking to current plan`));
+      }
+
+      results[subtask.id] = allResults;
+      failed.add(subtask.id);
+      return;
+    }
+
     // ── Reviewer consensus loop ──────────────────────────
     let reviewRound = 0;
     let modifiedFiles = coder.getModifiedFiles();
     let coderSummary = allResults[allResults.length - 1]?.output || "";
+    let finalReviewA: AgentResult | undefined;
+    let finalReviewB: AgentResult | undefined;
 
     while (reviewRound <= this.maxReviewerRounds) {
       console.log(chalk.blue(`  │ 🔍 Reviewers (round ${reviewRound})`));
@@ -436,26 +475,8 @@ export class Orchestrator {
         this.runReviewer(subtask, reviewRound, 2, modifiedFiles, coderSummary),
       ]);
       allResults.push(reviewA, reviewB);
-
-      // Replan based on both reviews (after they both finish)
-      if (completed.size < plan.subtasks.length) {
-        const reportA = this.extractReviewerReport(reviewA.output);
-        const reportB = this.extractReviewerReport(reviewB.output);
-        if (reportA) {
-          await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools, {
-            report: reportA,
-            source: `Reviewer 1 for ${subtask.id}`,
-            reviewStatus: reviewA.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
-          });
-        }
-        if (reportB) {
-          await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools, {
-            report: reportB,
-            source: `Reviewer 2 for ${subtask.id}`,
-            reviewStatus: reviewB.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
-          });
-        }
-      }
+      finalReviewA = reviewA;
+      finalReviewB = reviewB;
 
       const approvedA = reviewA.output.includes("[STATUS: APPROVED]");
       const approvedB = reviewB.output.includes("[STATUS: APPROVED]");
@@ -493,6 +514,53 @@ export class Orchestrator {
       reviewRound++;
     }
 
+    // ── Architect replan with investigation ────────────────
+    // Block next subtask until architect confirms plan or updates it
+    if (completed.size < plan.subtasks.length) {
+      const reportA = this.extractReviewerReport(finalReviewA?.output || "");
+      const reportB = this.extractReviewerReport(finalReviewB?.output || "");
+      const feedbacks: Array<{ report: string; source: string; reviewStatus: string }> = [];
+      if (reportA) {
+        feedbacks.push({
+          report: reportA,
+          source: `Reviewer 1 for ${subtask.id}`,
+          reviewStatus: finalReviewA!.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
+        });
+      }
+      if (reportB) {
+        feedbacks.push({
+          report: reportB,
+          source: `Reviewer 2 for ${subtask.id}`,
+          reviewStatus: finalReviewB!.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
+        });
+      }
+
+      console.log(chalk.magenta(`  🔄 Architect reviewing completed work before next subtask...`));
+      const newPlan = await architect.replanWithInvestigation(
+        taskDescription,
+        plan,
+        [...completed, subtask.id],
+        Object.fromEntries(
+          Object.entries(results).map(([k, v]) => [k, v.map((r) => ({ agentRole: r.agentRole, output: r.output }))])
+        ),
+        feedbacks
+      );
+
+      if (newPlan) {
+        plan.subtasks = newPlan.subtasks;
+        if (newPlan.rationale) plan.rationale = newPlan.rationale;
+        console.log(chalk.magenta(`  ✅ Plan updated by architect`));
+        // Print updated remaining
+        const updatedRemaining = plan.subtasks.filter((s) => !completed.has(s.id) && s.id !== subtask.id);
+        for (const s of updatedRemaining) {
+          const files = s.filesExpected ? chalk.gray(` 📄 ${s.filesExpected.join(", ")}`) : "";
+          console.log(chalk.magenta(`     └─ ${s.id}: ${s.title}${files}`));
+        }
+      } else {
+        console.log(chalk.magenta(`  ⏭  Architect: sticking to current plan`));
+      }
+    }
+
     // ── Verification gate (FYI) ────────────────────────────
     if (subtask.verification) {
       console.log(chalk.blue(`  │ 🧪 Architect verification: ${subtask.verification}`));
@@ -511,123 +579,6 @@ export class Orchestrator {
     // Mark done
     results[subtask.id] = allResults;
     completed.add(subtask.id);
-
-    // Final replan after subtask completion
-    if (completed.size < plan.subtasks.length) {
-      await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools);
-    }
-  }
-
-  // ── Re-planning ─────────────────────────────────────────
-
-  /**
-   * After a subtask completes, ask the architect if the remaining plan needs adjustment.
-   * Only re-plans if there are remaining subtasks.
-   */
-  private async maybeReplan(
-    taskDescription: string,
-    plan: TaskPlan,
-    completed: Set<string>,
-    results: Record<string, AgentResult[]>,
-    architect: ArchitectAgent,
-    architectTools: ToolRegistry,
-    reviewerFeedback?: { report: string; source: string; reviewStatus: string }
-  ): Promise<void> {
-    const remaining = plan.subtasks.filter((s) => !completed.has(s.id));
-    if (remaining.length === 0) return;
-
-    // Summarize what's been done
-    const completedSummary = plan.subtasks
-      .filter((s) => completed.has(s.id))
-      .map((s) => {
-        const res = results[s.id] || [];
-        const lastOutput = res[res.length - 1]?.output || "(no output)";
-        const preview = lastOutput.slice(0, 200);
-        return `- ${s.title}: ${preview}...`;
-      })
-      .join("\n");
-
-    const remainingSummary = remaining.map((s) => `- ${s.id}: ${s.title} - ${s.description.slice(0, 100)}`).join("\n");
-
-    const feedbackBlock = reviewerFeedback
-      ? `REVIEWER FEEDBACK:\nSource: ${reviewerFeedback.source}\nStatus: ${reviewerFeedback.reviewStatus}\nReport:\n${reviewerFeedback.report}\n`
-      : "";
-
-    // Ask architect (using a quick tool call - not a full planning pass)
-    const replanPrompt = `You planned the following task:
-
-Goal: ${plan.goal}
-
-COMPLETED subtasks:
-${completedSummary}
-
-${feedbackBlock}
-REMAINING subtasks:
-${remainingSummary}
-
-Based on completed work and any reviewer feedback above, do the remaining subtasks need changes?
-If the remaining plan is fine as-is, respond with "NO CHANGES".
-If changes are needed, describe what subtasks to add, modify, or remove. Be specific about which subtask IDs to change.`;
-
-    try {
-      const replanResult = await architect.replan(replanPrompt);
-
-      if (replanResult.includes("NO CHANGES")) {
-        return;
-      }
-
-      // Parse changes (simple heuristic - look for add/remove/modify instructions)
-      console.log(chalk.magenta(`\n  🔄 Architect adjusting plan...`));
-
-      // Ask architect to provide updated remaining subtasks as full JSON
-      const updatePrompt = `Based on your analysis, provide the UPDATED remaining subtasks as a JSON object matching the task plan schema.
-
-Current completed subtask IDs: ${[...completed].join(", ")}
-New subtasks should NOT duplicate completed ones.
-
-Respond with ONLY a JSON object, no other text:
-{
-  "goal": "${plan.goal}",
-  "rationale": "...",
-  "subtasks": [
-    {
-      "id": "task-N",
-      "title": "...",
-      "description": "...",
-      "dependencies": ["task-X"],
-      "verification": "...",
-      "filesExpected": ["src/foo.ts"],
-      "estimatedComplexity": "medium"
-    }
-  ]
-}`;
-
-      const updateResult = await architect.replan(updatePrompt);
-
-      // Try to parse JSON from the response
-      const jsonMatch = updateResult.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          const newPlan = JSON.parse(jsonMatch[0]) as TaskPlan;
-          const validNew = (newPlan.subtasks || []).filter(
-            (s) => !completed.has(s.id) && typeof s.title === "string" && typeof s.description === "string"
-          );
-          const keptSubtasks = plan.subtasks.filter((s) => completed.has(s.id));
-          plan.subtasks = [...keptSubtasks, ...validNew];
-          if (newPlan.rationale) plan.rationale = newPlan.rationale;
-
-          console.log(chalk.magenta(`  ✅ Plan updated: ${validNew.length} remaining subtask(s)`));
-          for (const s of validNew) {
-            const files = s.filesExpected ? chalk.gray(` 📄 ${s.filesExpected.join(", ")}`) : "";
-            console.log(chalk.magenta(`     └─ ${s.id}: ${s.title}${files}`));
-          }
-        } catch {
-          console.log(chalk.gray(`  ⏭  Could not parse updated plan - keeping original`));
-        }
-      }
-    } catch {
-      // Re-planning is best-effort - don't fail the whole run
-    }
   }
 
   // ── Reviewer helpers ───────────────────────────────────────
@@ -744,7 +695,7 @@ Respond with ONLY a JSON object, no other text:
     completedIds: string[],
     failedIds: Subtask[],
     duration: number,
-    totalTokens: { prompt: number; completion: number }
+    totalTokens: { prompt: number; completion: number; reasoning: number }
   ): void {
     console.log();
     console.log(chalk.green(boxTop()));
@@ -759,7 +710,8 @@ Respond with ONLY a JSON object, no other text:
 
     console.log(chalk.green(boxSep()));
     console.log(chalk.green(boxLine(`  ⏱  Duration: ${formatDuration(duration)}`)));
-    console.log(chalk.green(boxLine(`  🔧 Tokens: ${totalTokens.prompt + totalTokens.completion} total`)));
+    console.log(chalk.green(boxLine(`  🔧 Tokens: ${totalTokens.prompt + totalTokens.completion + totalTokens.reasoning} total`)));
+    console.log(chalk.green(boxLine(`     └─ input: ${totalTokens.prompt} │ output: ${totalTokens.completion} │ reasoning: ${totalTokens.reasoning}`)));
 
     if (failedIds.length > 0) {
       console.log(chalk.green(boxLine(`  ${chalk.yellow("⚠")}  ${failedIds.length} subtask(s) skipped`)));

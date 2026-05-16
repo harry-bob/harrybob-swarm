@@ -4,5 +4,6 @@ export interface StreamChunk {
   tool_calls?: { id: string; name: string; arguments: Record<string, unknown> }[];
   done: boolean;
   tokenCount?: number;
+  reasoningTokens?: number;
   durationNs?: number;
 }
