@@ -2,6 +2,8 @@ import { Command } from "commander";
 import { loadConfig, saveConfig, SwarmConfig } from "../../config/config.js";
 import { createProvider } from "../../providers/factory.js";
 import { OllamaProvider } from "../../providers/ollama.js";
+import { OpenRouterProvider } from "../../providers/openrouter.js";
+import { XiaomiProvider } from "../../providers/xiaomi.js";
 import * as readline from "node:readline";
 import chalk from "chalk";
 
@@ -25,14 +27,20 @@ export async function runLogin(config: SwarmConfig): Promise<void> {
   console.log(chalk.bold("Select provider:"));
   console.log("  1) OpenAI");
   console.log("  2) Ollama");
+  console.log("  3) OpenRouter");
+  console.log("  4) Xiaomi");
   console.log();
 
-  const choice = await ask(chalk.cyan("  Enter number (1-2): "));
+  const choice = await ask(chalk.cyan("  Enter number (1-4): "));
 
   if (choice === "1") {
     await loginOpenAI(config);
   } else if (choice === "2") {
     await loginOllama(config);
+  } else if (choice === "3") {
+    await loginOpenRouter(config);
+  } else if (choice === "4") {
+    await loginXiaomi(config);
   } else {
     console.log(chalk.yellow("  Cancelled."));
   }
@@ -120,6 +128,80 @@ async function loginOllama(config: SwarmConfig): Promise<void> {
 
   await saveConfig(config);
   console.log(chalk.green(`  ✓ Config saved. Provider: ollama, Model: ${selected}`));
+}
+
+async function loginOpenRouter(config: SwarmConfig): Promise<void> {
+  const apiKey = await ask(chalk.cyan("  Enter OpenRouter API key (or press Enter to keep current): "));
+  const model = await ask(chalk.cyan("  Enter model (default: anthropic/claude-3.5-sonnet): "));
+  const baseURL = await ask(chalk.cyan("  Enter base URL (default: https://openrouter.ai/api/v1): "));
+
+  if (apiKey) {
+    process.env.OPENROUTER_API_KEY = apiKey;
+    config.apiKey = apiKey;
+  }
+
+  config.provider = "openrouter";
+  config.model = model || "anthropic/claude-3.5-sonnet";
+  if (baseURL) {
+    config.baseURL = baseURL;
+  } else {
+    config.baseURL = "https://openrouter.ai/api/v1";
+  }
+
+  // Test connection
+  try {
+    const key = config.apiKey || process.env.OPENROUTER_API_KEY || "";
+    if (!key) {
+      console.log(chalk.yellow("  ⚠ No API key provided. Set OPENROUTER_API_KEY before running."));
+    } else {
+      const provider = new OpenRouterProvider({ apiKey: key, baseURL: config.baseURL });
+      const models = await provider.listModels();
+      console.log(chalk.green(`  ✓ Connection test passed — ${models.length} model(s) available`));
+    }
+  } catch (err) {
+    console.log(chalk.yellow(`  ⚠ Connection test failed: ${err instanceof Error ? err.message : String(err)}`));
+  }
+
+  await saveConfig(config);
+  console.log(chalk.green(`  ✓ Config saved. Provider: openrouter, Model: ${config.model}`));
+}
+
+async function loginXiaomi(config: SwarmConfig): Promise<void> {
+  const apiKey = await ask(chalk.cyan("  Enter Xiaomi API key (or press Enter to keep current): "));
+  const baseURL = await ask(chalk.cyan("  Enter Xiaomi base URL (required): "));
+  const model = await ask(chalk.cyan("  Enter model (default: xiaomi-large): "));
+
+  if (apiKey) {
+    process.env.XIAOMI_API_KEY = apiKey;
+    config.apiKey = apiKey;
+  }
+
+  const url = baseURL || config.baseURL || process.env.XIAOMI_BASE_URL || "";
+  if (!url) {
+    console.log(chalk.red("  ✗ Xiaomi base URL is required."));
+    return;
+  }
+
+  config.provider = "xiaomi";
+  config.model = model || "xiaomi-large";
+  config.baseURL = url;
+
+  // Test connection
+  try {
+    const key = config.apiKey || process.env.XIAOMI_API_KEY || "";
+    if (!key) {
+      console.log(chalk.yellow("  ⚠ No API key provided. Set XIAOMI_API_KEY before running."));
+    } else {
+      const provider = new XiaomiProvider({ apiKey: key, baseURL: url });
+      const models = await provider.listModels();
+      console.log(chalk.green(`  ✓ Connection test passed — ${models.length} model(s) available`));
+    }
+  } catch (err) {
+    console.log(chalk.yellow(`  ⚠ Connection test failed: ${err instanceof Error ? err.message : String(err)}`));
+  }
+
+  await saveConfig(config);
+  console.log(chalk.green(`  ✓ Config saved. Provider: xiaomi, Model: ${config.model}`));
 }
 
 export function loginCommand(program: Command): void {

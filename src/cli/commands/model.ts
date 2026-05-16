@@ -1,6 +1,8 @@
 import { Command } from "commander";
 import { loadConfig, saveConfig } from "../../config/config.js";
 import { OllamaProvider } from "../../providers/ollama.js";
+import { OpenRouterProvider } from "../../providers/openrouter.js";
+import { XiaomiProvider } from "../../providers/xiaomi.js";
 import { logError, logInfo, logSuccess, logWarning } from "../../utils/logger.js";
 import * as readline from "node:readline";
 import chalk from "chalk";
@@ -28,7 +30,7 @@ export function modelCommand(program: Command): void {
   model
     .command("select")
     .description("Interactively select a model")
-    .option("--base-url <url>", "Ollama API base URL")
+    .option("--base-url <url>", "API base URL")
     .option("--provider <provider>", "Provider to list models from")
     .action(async (options) => {
       const config = await loadConfig();
@@ -39,28 +41,45 @@ export function modelCommand(program: Command): void {
 
       const providerName = options.provider || config.provider;
       const baseURL = options.baseUrl || config.baseURL;
-
-      if (providerName !== "ollama") {
-        logWarning(`Model selection is currently only supported for Ollama. Current provider: ${providerName}`);
-        return;
-      }
-
-      console.log(chalk.cyan("\n📡 Fetching available models...\n"));
+      const apiKey = config.apiKey;
 
       let models: string[];
       try {
-        const provider = new OllamaProvider({ baseURL });
-        models = await provider.listModels();
-      } catch {
-        logError("Could not connect to Ollama. Make sure it's running: `ollama serve`");
+        if (providerName === "ollama") {
+          const provider = new OllamaProvider({ baseURL });
+          models = await provider.listModels();
+        } else if (providerName === "openrouter") {
+          const key = apiKey || process.env.OPENROUTER_API_KEY || "";
+          if (!key) {
+            logError("OpenRouter API key is required. Set OPENROUTER_API_KEY or use `swarm login`.");
+            process.exit(1);
+          }
+          const provider = new OpenRouterProvider({ apiKey: key, baseURL: baseURL || "https://openrouter.ai/api/v1" });
+          models = await provider.listModels();
+        } else if (providerName === "xiaomi") {
+          const key = apiKey || process.env.XIAOMI_API_KEY || "";
+          const url = baseURL || process.env.XIAOMI_BASE_URL || "";
+          if (!key || !url) {
+            logError("Xiaomi API key and base URL are required.");
+            process.exit(1);
+          }
+          const provider = new XiaomiProvider({ apiKey: key, baseURL: url });
+          models = await provider.listModels();
+        } else {
+          logWarning(`Model selection is not supported for provider: ${providerName}`);
+          return;
+        }
+      } catch (err) {
+        logError(`Could not fetch models: ${err instanceof Error ? err.message : String(err)}`);
         process.exit(1);
       }
 
       if (models.length === 0) {
-        logWarning("No models found. Pull one with: `ollama pull <model>`");
+        logWarning("No models found.");
         return;
       }
 
+      console.log(chalk.cyan(`\n📡 Fetching available models from ${providerName}...\n`));
       console.log(chalk.bold("🐝 Select a model:\n"));
       for (let i = 0; i < models.length; i++) {
         const marker = models[i] === config.model ? chalk.green(" ← current") : "";
@@ -130,32 +149,58 @@ export function modelCommand(program: Command): void {
   model
     .command("list")
     .description("List available models")
-    .option("--base-url <url>", "Ollama API base URL")
+    .option("--base-url <url>", "API base URL")
+    .option("--provider <provider>", "Provider to list models from")
     .action(async (options) => {
       const config = await loadConfig();
-      const baseURL = options.baseUrl || config?.baseURL || "http://localhost:11434";
+      const providerName = options.provider || config?.provider || "ollama";
+      const baseURL = options.baseUrl || config?.baseURL;
 
-      console.log(chalk.cyan("\n📡 Fetching models...\n"));
+      console.log(chalk.cyan(`\n📡 Fetching models from ${providerName}...\n`));
 
+      let models: string[];
       try {
-        const provider = new OllamaProvider({ baseURL });
-        const models = await provider.listModels();
-
-        if (models.length === 0) {
-          logWarning("No models found. Pull one with: `ollama pull <model>`");
+        if (providerName === "ollama") {
+          const provider = new OllamaProvider({ baseURL: baseURL || "http://localhost:11434" });
+          models = await provider.listModels();
+        } else if (providerName === "openrouter") {
+          const key = config?.apiKey || process.env.OPENROUTER_API_KEY || "";
+          if (!key) {
+            logError("OpenRouter API key is required. Set OPENROUTER_API_KEY or use `swarm login`.");
+            process.exit(1);
+          }
+          const provider = new OpenRouterProvider({ apiKey: key, baseURL: baseURL || "https://openrouter.ai/api/v1" });
+          models = await provider.listModels();
+        } else if (providerName === "xiaomi") {
+          const key = config?.apiKey || process.env.XIAOMI_API_KEY || "";
+          const url = baseURL || process.env.XIAOMI_BASE_URL || "";
+          if (!key || !url) {
+            logError("Xiaomi API key and base URL are required.");
+            process.exit(1);
+          }
+          const provider = new XiaomiProvider({ apiKey: key, baseURL: url });
+          models = await provider.listModels();
+        } else {
+          logWarning(`Model listing is not supported for provider: ${providerName}`);
           return;
         }
-
-        const currentModel = config?.model;
-        console.log(chalk.bold("📦 Available models:\n"));
-        for (const m of models) {
-          const marker = m === currentModel ? chalk.green(" ← current") : "";
-          console.log(`  • ${m}${marker}`);
-        }
-        console.log();
-      } catch {
-        logError("Could not connect to Ollama. Make sure it's running: `ollama serve`");
+      } catch (err) {
+        logError(`Could not fetch models: ${err instanceof Error ? err.message : String(err)}`);
+        process.exit(1);
       }
+
+      if (models.length === 0) {
+        logWarning("No models found.");
+        return;
+      }
+
+      const currentModel = config?.model;
+      console.log(chalk.bold("📦 Available models:\n"));
+      for (const m of models) {
+        const marker = m === currentModel ? chalk.green(" ← current") : "";
+        console.log(`  • ${m}${marker}`);
+      }
+      console.log();
 
       process.exit(0);
     });

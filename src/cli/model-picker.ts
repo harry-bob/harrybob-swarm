@@ -2,6 +2,8 @@ import * as readline from "node:readline";
 import chalk from "chalk";
 import { OllamaProvider } from "../providers/ollama.js";
 import { OpenAIProvider } from "../providers/openai.js";
+import { OpenRouterProvider } from "../providers/openrouter.js";
+import { XiaomiProvider } from "../providers/xiaomi.js";
 import type { SwarmConfig } from "../config/config.js";
 
 export interface ModelInfo {
@@ -59,7 +61,7 @@ export async function promptModelSelection(currentModel: string, baseURL?: strin
 }
 
 /**
- * Fetch models from ALL available providers (Ollama + OpenAI).
+ * Fetch models from ALL available providers.
  * Returns a combined list where each entry knows its provider.
  */
 async function fetchAllModels(config: SwarmConfig): Promise<ModelInfo[]> {
@@ -92,6 +94,36 @@ async function fetchAllModels(config: SwarmConfig): Promise<ModelInfo[]> {
     }
   }
 
+  // ── OpenRouter ──────────────────────────────────────────
+  const openrouterKey = config.apiKey || process.env.OPENROUTER_API_KEY || "";
+  const openrouterURL = config.baseURL || "https://openrouter.ai/api/v1";
+  if (openrouterKey) {
+    try {
+      const openrouter = new OpenRouterProvider({ apiKey: openrouterKey, baseURL: openrouterURL });
+      const models = await openrouter.listModels();
+      for (const m of models) {
+        results.push({ id: m, provider: "openrouter", baseURL: openrouterURL, apiKey: openrouterKey });
+      }
+    } catch {
+      // silently skip if key is invalid
+    }
+  }
+
+  // ── Xiaomi ──────────────────────────────────────────────
+  const xiaomiKey = config.apiKey || process.env.XIAOMI_API_KEY || "";
+  const xiaomiURL = config.baseURL || process.env.XIAOMI_BASE_URL || "";
+  if (xiaomiKey && xiaomiURL) {
+    try {
+      const xiaomi = new XiaomiProvider({ apiKey: xiaomiKey, baseURL: xiaomiURL });
+      const models = await xiaomi.listModels();
+      for (const m of models) {
+        results.push({ id: m, provider: "xiaomi", baseURL: xiaomiURL, apiKey: xiaomiKey });
+      }
+    } catch {
+      // silently skip
+    }
+  }
+
   return results;
 }
 
@@ -106,7 +138,7 @@ export async function promptInteractiveModelSelection(config: SwarmConfig): Prom
   const all = await fetchAllModels(config);
 
   if (all.length === 0) {
-    console.log(chalk.yellow("  No models found. Make sure Ollama is running or an OpenAI API key is set."));
+    console.log(chalk.yellow("  No models found. Make sure your provider is configured (Ollama running, or API keys set)."));
     return null;
   }
 
@@ -128,7 +160,13 @@ export async function promptInteractiveModelSelection(config: SwarmConfig): Prom
   const title = `🐝 ${all.length} model(s) found (↑↓ to navigate, Enter to confirm, Esc to cancel):`;
   const selectedIdx = await pickFromListIdx(labels, currentIdx >= 0 ? currentIdx : 0, title, (label, i) => {
     const m = all[i];
-    const providerColor = m.provider === "ollama" ? chalk.blue : chalk.magenta;
+    const providerColors: Record<string, (s: string) => string> = {
+      ollama: chalk.blue,
+      openai: chalk.magenta,
+      openrouter: chalk.yellow,
+      xiaomi: chalk.cyan,
+    };
+    const providerColor = providerColors[m.provider] || chalk.gray;
     return providerColor(`  ${m.provider.padEnd(7)} `) + m.id;
   });
 

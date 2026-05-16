@@ -152,6 +152,13 @@ Create a `.env` in the swarm project root:
 # Web search (optional)
 TAVILY_API_KEY=tvly-...
 
+# OpenRouter (optional)
+OPENROUTER_API_KEY=sk-or-v1-...
+
+# Xiaomi AI (optional)
+XIAOMI_API_KEY=...
+XIAOMI_BASE_URL=https://your-endpoint/v1
+
 # HuggingFace token (for benchmark datasets)
 HF_TOKEN=hf_...
 
@@ -160,6 +167,22 @@ OLLAMA_MODEL=nemotron-3-super:cloud
 ```
 
 ## Models
+
+### Providers
+
+| Provider | Required config |
+|----------|----------------|
+| `ollama` | Ollama running locally or remotely |
+| `openai` | `OPENAI_API_KEY` env var or `apiKey` in config |
+| `openrouter` | `OPENROUTER_API_KEY` env var or `apiKey` in config |
+| `xiaomi` | `XIAOMI_API_KEY` **and** `XIAOMI_BASE_URL` env vars |
+
+```bash
+swarm init --provider openrouter
+swarm init --provider xiaomi --base-url https://your-xiaomi-endpoint/v1
+```
+
+### Ollama models
 
 Works with any Ollama model. Cloud models recommended for best results:
 

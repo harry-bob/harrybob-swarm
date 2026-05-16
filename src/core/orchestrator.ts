@@ -337,8 +337,8 @@ export class Orchestrator {
   }
 
   /**
-   * Process a single subtask: coder → sequential reviewers → consensus → next subtask.
-   * After each reviewer finishes, the orchestrator adjusts the plan based on the reviewer's report.
+   * Process a single subtask: coder → parallel reviewers → consensus → next subtask.
+   * After both reviewers finish, the orchestrator adjusts the plan based on their reports.
    */
   private async processSubtask(
     subtask: Subtask,
@@ -430,28 +430,31 @@ export class Orchestrator {
     while (reviewRound <= this.maxReviewerRounds) {
       console.log(chalk.blue(`  │ 🔍 Reviewers (round ${reviewRound})`));
 
-      // Reviewer 1
-      const reviewA = await this.runReviewer(subtask, reviewRound, 1, modifiedFiles, coderSummary);
-      allResults.push(reviewA);
-      const reportA = this.extractReviewerReport(reviewA.output);
-      if (reportA && completed.size < plan.subtasks.length) {
-        await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools, {
-          report: reportA,
-          source: `Reviewer 1 for ${subtask.id}`,
-          reviewStatus: reviewA.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
-        });
-      }
+      // ── Run both reviewers in parallel ─────────────────────
+      const [reviewA, reviewB] = await Promise.all([
+        this.runReviewer(subtask, reviewRound, 1, modifiedFiles, coderSummary),
+        this.runReviewer(subtask, reviewRound, 2, modifiedFiles, coderSummary),
+      ]);
+      allResults.push(reviewA, reviewB);
 
-      // Reviewer 2
-      const reviewB = await this.runReviewer(subtask, reviewRound, 2, modifiedFiles, coderSummary);
-      allResults.push(reviewB);
-      const reportB = this.extractReviewerReport(reviewB.output);
-      if (reportB && completed.size < plan.subtasks.length) {
-        await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools, {
-          report: reportB,
-          source: `Reviewer 2 for ${subtask.id}`,
-          reviewStatus: reviewB.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
-        });
+      // Replan based on both reviews (after they both finish)
+      if (completed.size < plan.subtasks.length) {
+        const reportA = this.extractReviewerReport(reviewA.output);
+        const reportB = this.extractReviewerReport(reviewB.output);
+        if (reportA) {
+          await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools, {
+            report: reportA,
+            source: `Reviewer 1 for ${subtask.id}`,
+            reviewStatus: reviewA.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
+          });
+        }
+        if (reportB) {
+          await this.maybeReplan(taskDescription, plan, completed, results, architect, architectTools, {
+            report: reportB,
+            source: `Reviewer 2 for ${subtask.id}`,
+            reviewStatus: reviewB.output.includes("[STATUS: APPROVED]") ? "APPROVED" : "NEEDS_WORK",
+          });
+        }
       }
 
       const approvedA = reviewA.output.includes("[STATUS: APPROVED]");

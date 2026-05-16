@@ -8,9 +8,9 @@ export function initCommand(program: Command): void {
   program
     .command("init")
     .description("Initialize swarm configuration in current directory")
-    .option("--provider <provider>", "LLM provider (ollama, openai)", "ollama")
+    .option("--provider <provider>", "LLM provider (ollama, openai, openrouter, xiaomi)", "ollama")
     .option("--model <model>", "Model to use (auto-detected from Ollama if not set)")
-    .option("--base-url <url>", "Ollama API base URL", "http://localhost:11434")
+    .option("--base-url <url>", "API base URL", "http://localhost:11434")
     .action(async (options) => {
       logInfo("Initializing swarm configuration...");
 
@@ -43,6 +43,12 @@ export function initCommand(program: Command): void {
             model = "llama3.1";
           }
         }
+      } else if (!model && options.provider === "openai") {
+        model = "gpt-4o";
+      } else if (!model && options.provider === "openrouter") {
+        model = "anthropic/claude-3.5-sonnet";
+      } else if (!model && options.provider === "xiaomi") {
+        model = "xiaomi-large";
       } else if (!model) {
         model = "gpt-4o";
       }
