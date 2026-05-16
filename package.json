@@ -1,6 +1,6 @@
 {
   "name": "@harrybob/swarm-cli",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "CLI swarm agent developer tool with multi-agent orchestration",
   "type": "module",
   "main": "dist/index.js",
