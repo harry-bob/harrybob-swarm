@@ -67,76 +67,99 @@ export async function promptModelSelection(currentModel: string, baseURL?: strin
 async function fetchAllModels(config: SwarmConfig): Promise<ModelInfo[]> {
   const results: ModelInfo[] = [];
 
+  // Helper: get credentials for a provider without cross-contaminating providers
+  function getCreds(
+    providerName: string,
+    envKeyName: string,
+    envUrlName: string | null,
+    defaultUrl: string
+  ): { key: string; url: string } {
+    const isCurrent = config.provider === providerName;
+    const key = isCurrent
+      ? (config.apiKey || process.env[envKeyName] || "")
+      : (process.env[envKeyName] || config.apiKey || ""); // fallback to config.apiKey if env not set
+    const url = isCurrent
+      ? (config.baseURL || (envUrlName ? process.env[envUrlName] : "") || defaultUrl)
+      : ((envUrlName ? process.env[envUrlName] : "") || defaultUrl);
+    return { key, url };
+  }
+
   // ── Ollama ────────────────────────────────────────────────
-  const ollamaURL = config.provider === "ollama"
-    ? (config.baseURL || process.env.OLLAMA_BASE_URL || "http://localhost:11434")
-    : (process.env.OLLAMA_BASE_URL || "http://localhost:11434");
-  try {
-    const ollama = new OllamaProvider({ baseURL: ollamaURL });
-    const models = await ollama.listModels();
-    for (const m of models) {
-      results.push({ id: m, provider: "ollama", baseURL: ollamaURL });
+  {
+    const { url } = getCreds("ollama", "OLLAMA_BASE_URL", null, "http://localhost:11434");
+    try {
+      const ollama = new OllamaProvider({ baseURL: url });
+      const models = await ollama.listModels();
+      for (const m of models) {
+        results.push({ id: m, provider: "ollama", baseURL: url });
+      }
+      console.log(chalk.blue(`  ✓ Ollama: ${models.length} model(s)`));
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(chalk.gray(`  ○ Ollama skipped (${msg.slice(0, 60)})`));
     }
-  } catch {
-    // silently skip if Ollama isn't running
   }
 
   // ── OpenAI ──────────────────────────────────────────────
-  // Only use config.baseURL/config.apiKey if the current provider is openai;
-  // otherwise we risk calling another provider's endpoint with openai credentials.
-  const openaiKey = config.provider === "openai"
-    ? (config.apiKey || process.env.OPENAI_API_KEY || "")
-    : (process.env.OPENAI_API_KEY || "");
-  const openaiURL = config.provider === "openai"
-    ? (config.baseURL || "https://api.openai.com/v1")
-    : "https://api.openai.com/v1";
-  if (openaiKey) {
-    try {
-      const openai = new OpenAIProvider(openaiKey, openaiURL);
-      const models = await openai.listModels();
-      for (const m of models) {
-        results.push({ id: m, provider: "openai", baseURL: openaiURL, apiKey: openaiKey });
+  {
+    const { key, url } = getCreds("openai", "OPENAI_API_KEY", null, "https://api.openai.com/v1");
+    if (key) {
+      try {
+        const openai = new OpenAIProvider(key, url);
+        const models = await openai.listModels();
+        for (const m of models) {
+          results.push({ id: m, provider: "openai", baseURL: url, apiKey: key });
+        }
+        console.log(chalk.magenta(`  ✓ OpenAI: ${models.length} model(s)`));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(chalk.gray(`  ○ OpenAI skipped (${msg.slice(0, 60)})`));
       }
-    } catch {
-      // silently skip if key is invalid
+    } else {
+      console.log(chalk.gray(`  ○ OpenAI: no API key (set OPENAI_API_KEY or run \`/login\`)`));
     }
   }
 
   // ── OpenRouter ──────────────────────────────────────────
-  const openrouterKey = config.provider === "openrouter"
-    ? (config.apiKey || process.env.OPENROUTER_API_KEY || "")
-    : (process.env.OPENROUTER_API_KEY || "");
-  const openrouterURL = config.provider === "openrouter"
-    ? (config.baseURL || "https://openrouter.ai/api/v1")
-    : "https://openrouter.ai/api/v1";
-  if (openrouterKey) {
-    try {
-      const openrouter = new OpenRouterProvider({ apiKey: openrouterKey, baseURL: openrouterURL });
-      const models = await openrouter.listModels();
-      for (const m of models) {
-        results.push({ id: m, provider: "openrouter", baseURL: openrouterURL, apiKey: openrouterKey });
+  {
+    const { key, url } = getCreds("openrouter", "OPENROUTER_API_KEY", null, "https://openrouter.ai/api/v1");
+    if (key) {
+      try {
+        const openrouter = new OpenRouterProvider({ apiKey: key, baseURL: url });
+        const models = await openrouter.listModels();
+        for (const m of models) {
+          results.push({ id: m, provider: "openrouter", baseURL: url, apiKey: key });
+        }
+        console.log(chalk.yellow(`  ✓ OpenRouter: ${models.length} model(s)`));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(chalk.gray(`  ○ OpenRouter skipped (${msg.slice(0, 60)})`));
       }
-    } catch {
-      // silently skip if key is invalid
+    } else {
+      console.log(chalk.gray(`  ○ OpenRouter: no API key (set OPENROUTER_API_KEY or run \`/login\`)`));
     }
   }
 
   // ── Xiaomi ──────────────────────────────────────────────
-  const xiaomiKey = config.provider === "xiaomi"
-    ? (config.apiKey || process.env.XIAOMI_API_KEY || "")
-    : (process.env.XIAOMI_API_KEY || "");
-  const xiaomiURL = config.provider === "xiaomi"
-    ? (config.baseURL || process.env.XIAOMI_BASE_URL || "")
-    : (process.env.XIAOMI_BASE_URL || "");
-  if (xiaomiKey && xiaomiURL) {
-    try {
-      const xiaomi = new XiaomiProvider({ apiKey: xiaomiKey, baseURL: xiaomiURL });
-      const models = await xiaomi.listModels();
-      for (const m of models) {
-        results.push({ id: m, provider: "xiaomi", baseURL: xiaomiURL, apiKey: xiaomiKey });
+  {
+    const { key, url } = getCreds("xiaomi", "XIAOMI_API_KEY", "XIAOMI_BASE_URL", "");
+    if (key && url) {
+      try {
+        const xiaomi = new XiaomiProvider({ apiKey: key, baseURL: url });
+        const models = await xiaomi.listModels();
+        for (const m of models) {
+          results.push({ id: m, provider: "xiaomi", baseURL: url, apiKey: key });
+        }
+        console.log(chalk.cyan(`  ✓ Xiaomi: ${models.length} model(s)`));
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(chalk.gray(`  ○ Xiaomi skipped (${msg.slice(0, 60)})`));
       }
-    } catch {
-      // silently skip
+    } else {
+      const missing = [];
+      if (!key) missing.push("API key");
+      if (!url) missing.push("base URL");
+      console.log(chalk.gray(`  ○ Xiaomi: missing ${missing.join(" + ")} (run \`/login\`)`));
     }
   }
 
