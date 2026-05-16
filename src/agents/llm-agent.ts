@@ -5,6 +5,7 @@ import chalk from "chalk";
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 10_000;
+const MAX_AGENT_ROUNDS = 15; // safety guard against infinite tool loops
 
 async function withRetry<T>(fn: () => Promise<T>, label: string, roleTag: string): Promise<T> {
   let lastErr: unknown;
@@ -185,8 +186,16 @@ export class LLMAgent extends BaseAgent {
     let totalCompletion = 0;
     let totalReasoning = 0;
     let finalContent = "";
+    let round = 0;
 
     while (true) {
+      round++;
+      if (round > MAX_AGENT_ROUNDS) {
+        console.log(chalk.yellow(`${roleTag} ⚠ Hit max agent rounds (${MAX_AGENT_ROUNDS}) — forcing completion.`));
+        finalContent = finalContent || content || "(max rounds reached)";
+        break;
+      }
+
       // Prevent context-window bloat during long review loops
       this.compactHistory();
 
@@ -335,6 +344,13 @@ export class LLMAgent extends BaseAgent {
           role: "user",
           content: `Tool "${result.name}" result:\n${result.output}`,
         });
+      }
+
+      // Terminate loop immediately if a final/return tool was called.
+      // Prevents reviewers from getting stuck after calling return_review.
+      if (toolCalls?.some((tc) => tc.name === "return_review")) {
+        finalContent = content || "(return_review submitted)";
+        break;
       }
     }
 

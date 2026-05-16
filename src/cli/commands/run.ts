@@ -40,7 +40,7 @@ export function runCommand(program: Command): void {
           console.log(`\n🎯 Goal: ${result.plan.goal}`);
           console.log(`📦 Subtasks: ${result.plan.subtasks.length}`);
           for (const st of result.plan.subtasks) {
-            const status = result.output.includes(st.id) ? "✅" : "⬜";
+            const status = result.completed.includes(st.id) ? "✅" : result.failed.includes(st.id) ? "❌" : "⬜";
             console.log(`  ${status} [${st.id}] ${st.title}`);
           }
           console.log();

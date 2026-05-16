@@ -28,13 +28,15 @@ interface RunOptions {
   verbose?: boolean;
 }
 
-interface RunResult {
+export interface RunResult {
   output: string;
   duration: number;
   agentsUsed: string[];
   iterations: number;
   tokenUsage: { prompt: number; completion: number; reasoning: number };
   plan?: TaskPlan;
+  completed: string[];
+  failed: string[];
 }
 
 // ── Tool registries (with sandbox + cache) ────────────────────
@@ -93,6 +95,7 @@ You have these tools: list_files, read_file, write_file, edit_file, run_command,
 2. IMPLEMENT: Use write_file for new files, edit_file for modifications. edit_file requires the EXACT old text match.
 3. VERIFY: Run tests, build commands, or the code itself to prove correctness. Fix any failures immediately.
 4. EDGE CASES: Handle errors, null inputs, and boundary conditions explicitly.
+5. NO REPEATS: Do NOT call any tool with the same arguments twice. If you already listed files or read a file, the result is in the history above.
 
 ## Tool Usage
 - write_file - create new files with complete content
@@ -119,7 +122,7 @@ const REVIEWER_TOOLS_PROMPT = `
 You have these tools: list_files, read_file, write_file, run_command, do_test, return_review.
 
 ## Review Protocol
-1. INSPECT: Read all modified and relevant files.
+1. INSPECT: Read all modified and relevant files. Do NOT re-read a file that is already in the conversation history above.
 2. WRITE INDEPENDENT TEST: Use **do_test(code)** to create and run your OWN test / verification script. Do NOT rely on tests written by the coder — write a fresh one that exercises the behavior from a different angle.
    - Pass the complete test code to do_test. It will be saved to test/{taskId}/reviewer{index}/ and executed automatically.
    - The test must exercise actual behavior: call functions, check outputs, assert edge cases.
@@ -136,7 +139,11 @@ You have these tools: list_files, read_file, write_file, run_command, do_test, r
 4. FEEDBACK: Provide specific, actionable feedback with file names and line references where applicable.
 
 ## Final Submission
-Your VERY LAST action MUST be calling **return_review(report, approved)**. Do not output any text after calling it.
+You MUST call **return_review(report, approved)** as your final action. This is CRITICAL:
+- return_review MUST be the ONLY tool call in the assistant message.
+- Do NOT include any other tool calls alongside return_review.
+- Do NOT write any text before or after calling return_review.
+- Your entire response should consist of ONLY the return_review tool call and nothing else.
 - report: a structured string with these sections:
   FILES_CHECKED: which files you inspected
   TEST_APPROACH: what behavior your independent test exercised
@@ -279,6 +286,8 @@ export class Orchestrator {
       iterations: 0,
       tokenUsage: totalTokens,
       plan,
+      completed: completedIds,
+      failed: failedIds.map((s) => s.id),
     };
   }
 
@@ -627,12 +636,14 @@ export class Orchestrator {
       }],
     });
 
-    // Inspect the reviewer's history for the return_review tool call
+    // Inspect the reviewer's history for the return_review tool call (use the last one)
     const history = reviewer.getHistory();
-    const returnCall = history
+    const returnCalls = history
       .filter((m) => m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0)
       .flatMap((m) => m.tool_calls!)
-      .find((tc) => tc.name === "return_review");
+      .filter((tc) => tc.name === "return_review");
+
+    const returnCall = returnCalls.length > 0 ? returnCalls[returnCalls.length - 1] : undefined;
 
     if (returnCall) {
       const report = (returnCall.arguments.report as string) || "";

@@ -49,9 +49,10 @@ Gather enough context about the project structure, existing code, and relevant t
 6. CLARIFY: Only use ask_user_question if the task has genuinely ambiguous requirements after investigation.
 
 ## Efficiency Rules
-- Do NOT call the same tool with the same arguments more than once. Previous tool results are in the conversation history.
+- Do NOT call the same tool with the same arguments more than once. Previous tool results are in the conversation history. Repeating a tool call wastes tokens and is never necessary.
 - After listing a directory, read the specific files you need — do not re-list the same directory.
 - After reading a file, do not read it again unless you suspect it changed.
+- If you feel the urge to call list_files(path: ".") again, STOP — the result is already in the history above.
 
 ## Output Format
 After your investigation, produce a structured REPORT with these sections:
@@ -155,9 +156,10 @@ Your job is to determine if the remaining plan still makes sense, or if it needs
    If changes are needed, produce updated remaining subtasks.
 
 ## Efficiency Rules
-- Do NOT call the same tool with the same arguments more than once.
+- Do NOT call the same tool with the same arguments more than once. Repeating a tool call wastes tokens and is never necessary.
 - After listing a directory, read the specific files you need — do not re-list the same directory.
 - After reading a file, do not read it again unless you suspect it changed.
+- If you feel the urge to call list_files(path: ".") again, STOP — the result is already in the history above.
 
 ## Output Format
 After your investigation, respond with ONE of:
@@ -736,7 +738,7 @@ export class ArchitectAgent {
         for (const tc of msg.tool_calls) {
           // Look for the matching user result message (usually the next one or soon after)
           let result = "";
-          for (let j = i + 1; j < messages.length && j <= i + tc.id ? 5 : 3; j++) {
+          for (let j = i + 1; j < messages.length && j < i + 6; j++) {
             const candidate = messages[j];
             if (
               candidate.role === "user" &&

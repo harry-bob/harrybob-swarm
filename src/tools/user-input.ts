@@ -4,6 +4,10 @@ import chalk from "chalk";
 
 function askUser(promptText: string): Promise<string> {
   return new Promise((resolve) => {
+    // The TUI pauses stdin when suspending; readline needs it flowing again.
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stderr,
@@ -11,14 +15,14 @@ function askUser(promptText: string): Promise<string> {
 
     rl.on("SIGINT", () => {
       rl.close();
+      process.stdin.pause();
       resolve("");
     });
 
     process.stderr.write(chalk.green(`\n💬 Architect asks: ${promptText}\n`));
-    process.stderr.write(chalk.gray("Your answer: "));
-
-    rl.question("", (answer) => {
+    rl.question(chalk.gray("Your answer: "), (answer) => {
       rl.close();
+      process.stdin.pause();
       resolve(answer.trim());
     });
   });

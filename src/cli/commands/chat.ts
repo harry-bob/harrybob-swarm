@@ -161,8 +161,9 @@ export async function runChat(config: import("../../config/config.js").SwarmConf
           tui.divider();
           if (result.plan) {
             for (const st of result.plan.subtasks) {
-              const done = result.output.includes(st.id) || result.output.includes(st.title);
-              const icon = done ? chalk.green("✅") : chalk.red("❌");
+              const done = result.completed.includes(st.id);
+              const failed = result.failed.includes(st.id);
+              const icon = done ? chalk.green("✅") : failed ? chalk.red("❌") : chalk.yellow("⬜");
               tui.printSystem(`${icon} ${st.id}: ${st.title}`);
             }
           }
