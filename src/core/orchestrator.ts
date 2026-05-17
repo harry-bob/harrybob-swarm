@@ -5,8 +5,8 @@ import { TaskPlan, Subtask } from "./types.js";
 import { createProvider } from "../providers/factory.js";
 import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTool, createEditFileTool, createListFilesTool, createRunCommandTool, createAskUserQuestionTool, createWebSearchTool, createResearchTool, createReviewerTestTool, createReviewerReturnTool } from "../tools/index.js";
 import { saveSession } from "./session.js";
-import { withTimeout } from "../utils/timeout.js";
 import { getPackageVersion } from "../utils/version.js";
+import { RunController } from "./run-controller.js";
 import chalk from "chalk";
 
 interface SwarmConfig {
@@ -30,6 +30,8 @@ interface RunOptions {
   resumePlan?: TaskPlan;
   /** IDs of subtasks already completed in a prior run */
   resumeCompleted?: string[];
+  /** Enable /status, /skip, /stop slash commands during execution */
+  enableRunCommands?: boolean;
 }
 
 export interface RunResult {
@@ -75,6 +77,7 @@ function createArchitectTools(sandbox: Sandbox, provider: any, model: string, co
   const r = new ToolRegistry();
   r.register(createReadFileTool(sandbox));
   r.register(createListFilesTool(sandbox));
+  r.register(createRunCommandTool(sandbox));
   if (!isToolDisabled("ask_user_question", config)) r.register(createAskUserQuestionTool());
   if (!isToolDisabled("web_search", config)) r.register(createWebSearchTool());
   if (!isToolDisabled("research", config)) r.register(createResearchTool(provider, model, sandbox));
@@ -208,8 +211,7 @@ export class Orchestrator {
   }
 
   async run(taskDescription: string, options: RunOptions = {}): Promise<RunResult> {
-    const timeoutMs = this.config.orchestration.timeout || 600_000; // default 10 min
-    return withTimeout(this._run(taskDescription, options), timeoutMs, "Swarm run");
+    return this._run(taskDescription, options);
   }
 
   private async _run(taskDescription: string, options: RunOptions = {}): Promise<RunResult> {
@@ -254,23 +256,37 @@ export class Orchestrator {
     console.log(chalk.blue.bold("⚡ PHASE 2: EXECUTION"));
     console.log(chalk.blue(`${"─".repeat(60)}`));
 
-    const subtaskResults = await this.executePipeline(taskDescription, plan, architect, resumeCompleted);
+    // Start run-command listener (only in non-TUI, non-piped contexts)
+    const controller = options.enableRunCommands ? new RunController() : null;
+    controller?.start();
 
-    // ── Phase 2b: Completion Report ───────────────────────────
+    let subtaskResults: Record<string, AgentResult[]>;
+    let stopped = false;
+    try {
+      const pipelineResult = await this.executePipeline(taskDescription, plan, architect, resumeCompleted, controller);
+      subtaskResults = pipelineResult.results;
+      stopped = pipelineResult.stopped;
+    } finally {
+      controller?.stop();
+    }
+
     const allResults = Object.values(subtaskResults).flat();
     const allOutput = allResults.map((r) => r.output).filter(Boolean).join("\n\n");
     const completedIds = Object.keys(subtaskResults);
 
-    console.log(chalk.magenta(`\n${"─".repeat(60)}`));
-    console.log(chalk.magenta.bold("📝 COMPLETION REPORT"));
-    console.log(chalk.magenta(`${"─".repeat(60)}`));
+    // ── Phase 2b: Completion Report (skip if user stopped early) ─
+    if (!stopped) {
+      console.log(chalk.magenta(`\n${"─".repeat(60)}`));
+      console.log(chalk.magenta.bold("📝 COMPLETION REPORT"));
+      console.log(chalk.magenta(`${"─".repeat(60)}`));
 
-    const report = await architect.generateReport(taskDescription, plan, completedIds, allOutput);
-    console.log();
-    for (const line of report.split("\n")) {
-      console.log(chalk.white(`  ${line}`));
+      const report = await architect.generateReport(taskDescription, plan, completedIds, allOutput);
+      console.log();
+      for (const line of report.split("\n")) {
+        console.log(chalk.white(`  ${line}`));
+      }
+      console.log();
     }
-    console.log();
 
     // ── Phase 3: Summary ──────────────────────────────────────
     const duration = Date.now() - startTime;
@@ -343,47 +359,68 @@ export class Orchestrator {
     taskDescription: string,
     plan: TaskPlan,
     architect: ArchitectAgent,
-    initialCompleted: string[] = []
-  ): Promise<Record<string, AgentResult[]>> {
+    initialCompleted: string[] = [],
+    controller: RunController | null = null
+  ): Promise<{ results: Record<string, AgentResult[]>; stopped: boolean }> {
     const results: Record<string, AgentResult[]> = {};
     const completed = new Set<string>(initialCompleted);
     const failed = new Set<string>();
     const reviewRounds = new Map<string, number>();
 
-    const getReady = (): Subtask[] =>
-      plan.subtasks.filter(
-        (st) =>
-          !completed.has(st.id) &&
-          !failed.has(st.id) &&
-          st.dependencies.every((dep) => completed.has(dep)) &&
-          !st.dependencies.some((dep) => failed.has(dep))
-      );
+    // Seed controller with resume count
+    if (controller) {
+      controller.completedCount = initialCompleted.length;
+      controller.totalSubtasks = plan.subtasks.length;
+    }
 
-    while (completed.size + failed.size < plan.subtasks.length) {
-      const ready = getReady();
-      if (ready.length === 0) break;
+    let index = 0;
+    while (index < plan.subtasks.length) {
+      const subtask = plan.subtasks[index];
+      index++;
+      if (completed.has(subtask.id) || failed.has(subtask.id)) continue;
 
-      for (const subtask of ready) {
-        try {
-          await this.processSubtask(
-            subtask,
-            plan,
-            results,
-            completed,
-            failed,
-            reviewRounds,
-            taskDescription,
-            architect
-          );
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          console.log(chalk.red(`  ❌ [${subtask.id}] unhandled pipeline error: ${msg}`));
-          failed.add(subtask.id);
-        }
+      // Keep total in sync — architect replanning can change plan.subtasks
+      if (controller) controller.totalSubtasks = plan.subtasks.length;
+
+      // /stop — finish gracefully before starting the next subtask
+      if (controller?.stopRequested) {
+        console.log(chalk.yellow("\n⚡ Stopping run as requested — no more subtasks will run.\n"));
+        return { results, stopped: true };
+      }
+
+      // /skip — skip this subtask before it even starts
+      if (controller?.consumeSkip()) {
+        console.log(chalk.yellow(`\n⚡ Skipping ${subtask.id}: ${subtask.title}\n`));
+        failed.add(subtask.id);
+        continue;
+      }
+
+      controller?.update(subtask.id, subtask.title, index, plan.subtasks.length);
+
+      try {
+        await this.processSubtask(
+          subtask,
+          plan,
+          results,
+          completed,
+          failed,
+          reviewRounds,
+          taskDescription,
+          architect,
+          controller
+        );
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.log(chalk.red(`  ❌ [${subtask.id}] unhandled pipeline error: ${msg}`));
+        failed.add(subtask.id);
+      }
+
+      if (controller && completed.has(subtask.id)) {
+        controller.completedCount++;
       }
     }
 
-    return results;
+    return { results, stopped: false };
   }
 
   /**
@@ -399,20 +436,11 @@ export class Orchestrator {
     failed: Set<string>,
     reviewRounds: Map<string, number>,
     taskDescription: string,
-    architect: ArchitectAgent
+    architect: ArchitectAgent,
+    controller: RunController | null = null
   ): Promise<void> {
     const cache = new FileCache();
     const coderConfig = this.config.agents.coder;
-
-    // Build dependency context
-    const depContext = subtask.dependencies
-      .map((dep) => {
-        const depResults = results[dep] || [];
-        const depSubtask = plan.subtasks.find((s) => s.id === dep);
-        const outputs = depResults.map((r) => `[${r.agentRole}]\n${r.output}`).join("\n");
-        return `### ${depSubtask?.title || dep}\n${outputs}`;
-      })
-      .join("\n\n");
 
     const allResults: AgentResult[] = [];
 
@@ -430,7 +458,6 @@ export class Orchestrator {
     );
 
     // Start coder conversation
-    const ctx = depContext ? `\n\nContext from prior subtasks:\n${depContext}` : "";
     const fileHints = subtask.filesExpected
       ? `\n\nFiles you are expected to create or modify: ${subtask.filesExpected.join(", ")}`
       : "";
@@ -441,7 +468,7 @@ export class Orchestrator {
     coder.startTask({
       id: `task-${subtask.id}-coder`,
       description: subtask.description,
-      messages: [{ role: "user", content: `Task: ${subtask.description}${ctx}${fileHints}${complexityHint}\n\nBegin implementing the task now. Use your tools.` }],
+      messages: [{ role: "user", content: `Task: ${subtask.description}${fileHints}${complexityHint}\n\nBegin implementing the task now. Use your tools.` }],
     });
 
     // ── First coder pass ───────────────────────────────────
@@ -511,6 +538,30 @@ export class Orchestrator {
     }
 
     // ── Reviewer consensus loop ──────────────────────────
+    // /skip — bail out after coder but before reviewers run.
+    // Architect will investigate and update the plan accordingly.
+    if (controller?.consumeSkip()) {
+      console.log(chalk.yellow(`\n⚡ Skipping reviews for ${subtask.id} — running architect replan with partial work\n`));
+      const skipFeedback = {
+        report: `Subtask "${subtask.title}" (${subtask.id}) was skipped by the user after the coder ran. The coder may have partially implemented the work. The architect should account for any changes already made when updating the plan.`,
+        source: `User /skip for ${subtask.id}`,
+        reviewStatus: "NEEDS_WORK",
+      };
+      const newPlan = await architect.replanWithInvestigation(
+        taskDescription, plan, [...completed],
+        Object.fromEntries(Object.entries(results).map(([k, v]) => [k, v.map((r) => ({ agentRole: r.agentRole, output: r.output }))])),
+        [skipFeedback]
+      );
+      if (newPlan) {
+        plan.subtasks = newPlan.subtasks;
+        if (newPlan.rationale) plan.rationale = newPlan.rationale;
+        console.log(chalk.magenta(`  ✅ Plan updated by architect after skip`));
+      }
+      results[subtask.id] = allResults;
+      failed.add(subtask.id);
+      return;
+    }
+
     let reviewRound = 0;
     let modifiedFiles = coder.getModifiedFiles();
     let coderSummary = allResults[allResults.length - 1]?.output || "";
@@ -729,13 +780,10 @@ export class Orchestrator {
     }
     console.log(chalk.magenta(`  📦 ${plan.subtasks.length} subtask(s)\n`));
 
-    // Build a dependency tree visualization
-    const allIds = new Set(plan.subtasks.map((s) => s.id));
     for (const st of plan.subtasks) {
-      const deps = st.dependencies.length > 0 ? chalk.gray(` → after ${st.dependencies.join(", ")}`) : chalk.gray(" → no deps");
       const comp = st.estimatedComplexity ? chalk.dim(` [${st.estimatedComplexity}]`) : "";
       const files = st.filesExpected ? chalk.dim(` 📄 ${st.filesExpected.join(", ")}`) : "";
-      console.log(chalk.magenta(`  ┌─ ${chalk.bold(st.id)}: ${st.title}${deps}${comp}`));
+      console.log(chalk.magenta(`  ┌─ ${chalk.bold(st.id)}: ${st.title}${comp}`));
       const desc = st.description.length > 100 ? st.description.slice(0, 100) + "..." : st.description;
       console.log(chalk.magenta(`  └─ ${chalk.dim(desc)}`));
       if (files) console.log(chalk.magenta(`     ${files}`));

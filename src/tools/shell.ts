@@ -2,7 +2,8 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { Tool } from "./types.js";
 import { Sandbox } from "./sandbox.js";
 
-const DEFAULT_TIMEOUT_MS = 90_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
+const MAX_TIMEOUT_MS = 90_000;
 const MAX_BUFFER = 10 * 1024 * 1024;
 const KILL_GRACE_MS = 2_000;
 const HARD_RESOLVE_MS = 5_000;
@@ -111,12 +112,12 @@ export function createRunCommandTool(sandbox: Sandbox, defaultTimeoutMs = DEFAUL
     definition: {
       name: "run_command",
       description:
-        "Execute a shell command and return its stdout/stderr. Default timeout is 30s — commands killed if they exceed it. Pass timeout=N (seconds) to override.",
+        `Execute a shell command and return its stdout/stderr. Default timeout is 30s — commands killed if they exceed it. Pass timeout=N (seconds) to override (maximum ${MAX_TIMEOUT_MS / 1000}s).`,
       parameters: {
         command: { type: "string", description: "The shell command to execute" },
         timeout: {
           type: "number",
-          description: "Timeout in seconds (default: 30). Set to 0 for no timeout.",
+          description: `Timeout in seconds (default: 30, max: ${MAX_TIMEOUT_MS / 1000}).`,
           required: false,
         },
       },
@@ -126,7 +127,8 @@ export function createRunCommandTool(sandbox: Sandbox, defaultTimeoutMs = DEFAUL
       const cwd = sandbox.getRoot();
       const requestedTimeoutSec =
         typeof args.timeout === "number" && !isNaN(args.timeout) ? args.timeout : undefined;
-      const timeoutMs = requestedTimeoutSec != null ? requestedTimeoutSec * 1000 : defaultTimeoutMs;
+      const requestedMs = requestedTimeoutSec != null ? requestedTimeoutSec * 1000 : defaultTimeoutMs;
+      const timeoutMs = Math.min(requestedMs, MAX_TIMEOUT_MS);
 
       return runCommand(command, cwd, timeoutMs);
     },

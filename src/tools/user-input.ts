@@ -4,12 +4,17 @@ import chalk from "chalk";
 
 function askUser(promptText: string): Promise<string> {
   return new Promise((resolve) => {
-    // The TUI pauses stdin when suspending; readline needs it flowing again.
-    process.stdin.resume();
-    process.stdin.setEncoding("utf8");
+    // Ensure stdin is in cooked (non-raw) mode so readline can handle
+    // echo and line buffering, regardless of what the TUI left it in.
+    const stdin = process.stdin;
+    if ("setRawMode" in stdin && typeof (stdin as any).setRawMode === "function") {
+      (stdin as any).setRawMode(false);
+    }
+    stdin.resume();
+    stdin.setEncoding("utf8");
 
     const rl = readline.createInterface({
-      input: process.stdin,
+      input: stdin,
       output: process.stderr,
     });
 

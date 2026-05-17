@@ -619,7 +619,12 @@ export class TUI {
       stdin.setRawMode(false);
     }
     stdin.pause();
-    stdin.removeAllListeners("data");
+    // Only remove the TUI's own listener — NOT all listeners.
+    // readline.emitKeypressEvents() attaches an internal 'data' listener that
+    // is keyed by a flag on the stream object; removing it with
+    // removeAllListeners breaks subsequent readline instances because the flag
+    // still says "already set up" but the listener is gone.
+    stdin.removeListener("data", this.onStdinData);
     if (this.origStdoutWrite) this.origStdoutWrite("\x1b[?2004l");
   }
 

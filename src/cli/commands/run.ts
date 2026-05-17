@@ -31,6 +31,7 @@ export function runCommand(program: Command): void {
         const result = await orchestrator.run(task, {
           agents: options.agents,
           verbose: options.verbose,
+          enableRunCommands: true,
         });
 
         console.log("\n" + "=".repeat(60));

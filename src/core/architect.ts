@@ -6,7 +6,9 @@ import chalk from "chalk";
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 10_000;
-const MAX_TOOL_ROUNDS = 100;
+const MAX_INVESTIGATE_ROUNDS = 20;
+const MAX_REPLAN_ROUNDS = 15;
+const MAX_NO_TOOL_NUDGES = 2; // abort loop if model refuses to call tools
 
 async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
   let lastErr: unknown;
@@ -46,7 +48,7 @@ Gather enough context about the project structure, existing code, and relevant t
 3. MAP DEPENDENCIES: Understand which files import from which. Identify the module graph.
 4. GAP ANALYSIS: Determine what already exists vs. what needs to be built. Note existing patterns (error handling, naming conventions, testing style).
 5. EXTERNAL KNOWLEDGE: If the task involves unfamiliar libraries or APIs, use web_search or research to gather context.
-6. CLARIFY: Only use ask_user_question if the task has genuinely ambiguous requirements after investigation.
+6. CLARIFY: Only use ask_user_question if the task has genuinely ambiguous requirements after investigation. NEVER use it for technical issues like file read errors — use run_command("cat <path>") as a fallback instead.
 
 ## Efficiency Rules
 - Do NOT call the same tool with the same arguments more than once. Previous tool results are in the conversation history. Repeating a tool call wastes tokens and is never necessary.
@@ -64,6 +66,48 @@ After your investigation, produce a structured REPORT with these sections:
 - RECOMMENDATIONS: Suggested approach and key design decisions
 
 Do NOT produce a task plan yet. Focus purely on understanding and reporting.`;
+
+// ── Phase 3: Completion Report ───────────────────────────
+
+const REPORTER_SYSTEM_PROMPT = `You are an expert software architect writing a post-run completion report.
+
+## Your Mission
+Investigate what was actually built/changed during this task, then produce a clear summary + usage guide.
+
+## Tools
+- read_file — read file contents
+- list_files — list files and directories
+- run_command — execute shell commands (e.g., "cat package.json", "ls -la src/")
+
+## Investigation Protocol
+1. Use list_files on the project root to understand the current state.
+2. Read the most relevant files that were likely created or modified (focus on entry points, configs, new modules).
+3. Run commands if needed to understand how to use the result (e.g., "cat README.md", "node --version").
+4. Keep it focused — 3-6 tool calls is enough.
+
+## Efficiency Rules
+- Do NOT call the same tool twice with the same arguments.
+- Do NOT ask the user any questions.
+
+## Output Format
+After investigating, write a completion report in markdown with EXACTLY these sections:
+
+### What Was Accomplished
+2-4 bullet points describing what was built or changed. Be specific about files and functionality.
+
+### Files Created / Modified
+Group by "New files:" and "Modified files:" with a one-line description of each.
+
+### How to Use It
+Concrete usage instructions. Include:
+- Exact commands to run
+- Any required configuration or environment variables
+- The main entry point or interface
+
+### What's Left (if anything)
+Any skipped subtasks or obvious follow-up work. Omit this section if everything completed.
+
+Keep the report practical. No filler text.`;
 
 // ── Phase 2: Planning ─────────────────────────────────────
 
@@ -89,21 +133,16 @@ Your job is to produce a JSON task plan that breaks the work into independent, p
    - Each description must specify expected behavior, inputs, and outputs.
    - Include a "filesExpected" array listing files the subtask will touch.
 
-3. DESIGN FOR PARALLELISM:
-   - Identify independent work streams and give them separate subtasks.
-   - Only add dependencies when one subtask truly needs the OUTPUT of another (e.g., a utility must exist before a feature uses it).
-   - Prefer "interface-first" ordering: define types/contracts early, implement consumers in parallel.
+3. ORDER LOGICALLY:
+   - Subtasks execute in the order listed, one after another — there are no parallel tracks.
+   - Put foundational pieces first (types, utilities, schemas) before the code that uses them.
+   - Use ids like "task-1", "task-2", "task-3".
 
 4. VERIFICATION:
    - Every subtask SHOULD have a "verification" command (test, build, lint, run).
    - Verification must be specific: "npm test -- src/foo.test.ts", not "run tests".
 
-5. DEPENDENCY GRAPH:
-   - Must be acyclic.
-   - Use ids like "task-1", "task-2", "task-3".
-   - A subtask with no dependencies can start immediately.
-
-6. COMPLEXITY ESTIMATION:
+5. COMPLEXITY ESTIMATION:
    - Tag each subtask with estimatedComplexity: "low", "medium", or "high".
 
 ## Output Format — ONLY JSON
@@ -111,13 +150,12 @@ Respond with ONLY a valid JSON object. No markdown fences, no preamble, no comme
 
 {
   "goal": "Brief summary of the overall goal",
-  "rationale": "Explain WHY you chose this breakdown, parallelism strategy, and ordering",
+  "rationale": "Explain WHY you chose this breakdown and ordering",
   "subtasks": [
     {
       "id": "task-1",
       "title": "Short title",
       "description": "Detailed description with exact file names, function names, and requirements. A developer should be able to implement this without asking questions.",
-      "dependencies": [],
       "verification": "npm test -- src/foo.test.ts",
       "filesExpected": ["src/foo.ts", "src/foo.test.ts"],
       "estimatedComplexity": "medium"
@@ -155,6 +193,12 @@ Your job is to determine if the remaining plan still makes sense, or if it needs
 5. DECIDE: If the remaining plan is good as-is, say "NO CHANGES".
    If changes are needed, produce updated remaining subtasks.
 
+## Handling Read Errors
+If read_file returns an ENOENT or similar error for a file that appears in list_files:
+- Try run_command("cat <path>") as a fallback — this often succeeds when read_file has a transient issue.
+- If that also fails, rely on the reviewer feedback to understand what was built.
+- NEVER ask the user about filesystem errors or whether to proceed — just make the best decision you can from the available information.
+
 ## Efficiency Rules
 - Do NOT call the same tool with the same arguments more than once. Repeating a tool call wastes tokens and is never necessary.
 - After listing a directory, read the specific files you need — do not re-list the same directory.
@@ -173,7 +217,6 @@ After your investigation, respond with ONE of:
       "id": "task-3",
       "title": "...",
       "description": "...",
-      "dependencies": ["task-1"],
       "verification": "...",
       "filesExpected": ["src/foo.ts"],
       "estimatedComplexity": "medium"
@@ -282,8 +325,9 @@ export class ArchitectAgent {
     const toolDefs = this.tools.getDefinitions();
     let rounds = 0;
     let hasUsedTool = false;
+    let nudgeCount = 0;
 
-    while (rounds < MAX_TOOL_ROUNDS) {
+    while (rounds < MAX_REPLAN_ROUNDS) {
       rounds++;
 
       const progressSummary = this.summarizeInvestigationProgress(messages);
@@ -342,6 +386,11 @@ export class ArchitectAgent {
       }
 
       if (!hasUsedTool) {
+        nudgeCount++;
+        if (nudgeCount > MAX_NO_TOOL_NUDGES) {
+          console.log(chalk.yellow(`[architect] ⚠ Model not calling tools after ${nudgeCount} nudges — proceeding without investigation`));
+          return null;
+        }
         messages.push({
           role: "user",
           content: `Before you can decide, you MUST use tools to investigate the current state. Please use list_files and read_file to check what was actually built. Do not respond without first exploring the project.`,
@@ -361,7 +410,7 @@ export class ArchitectAgent {
       return this.parseRemainingPlan(content, plan, completedIds);
     }
 
-    console.log(chalk.yellow(`[architect] ⚠ Hit max tool rounds (${MAX_TOOL_ROUNDS}), keeping original plan`));
+    console.log(chalk.yellow(`[architect] ⚠ Hit max replan rounds (${MAX_REPLAN_ROUNDS}), keeping original plan`));
     return null;
   }
 
@@ -438,56 +487,100 @@ export class ArchitectAgent {
     completedIds: string[],
     allOutput: string,
   ): Promise<string> {
+    console.log(chalk.magenta("[architect] 📝 Generating completion report..."));
+
     const completedSubtasks = plan.subtasks.filter((s) => completedIds.includes(s.id));
     const failedSubtasks = plan.subtasks.filter((s) => !completedIds.includes(s.id));
 
-    const prompt = `You are an expert software architect. Generate a clear, concise completion report for the task that was just finished.
+    const context = [
+      `## Original Task\n${taskDescription}`,
+      `## Plan Goal\n${plan.goal}`,
+      `## Subtasks Completed\n${completedSubtasks.map((s) => `- ${s.id}: ${s.title}`).join("\n") || "(none)"}`,
+      failedSubtasks.length > 0
+        ? `## Subtasks Skipped\n${failedSubtasks.map((s) => `- ${s.id}: ${s.title}`).join("\n")}`
+        : "",
+    ].filter(Boolean).join("\n\n");
 
-## Original Task
-${taskDescription}
+    const messages: ChatMessage[] = [
+      { role: "system", content: REPORTER_SYSTEM_PROMPT },
+      { role: "system", content: `Current project directory: ${this.projectDir}` },
+      {
+        role: "user",
+        content: `${context}\n\nInvestigate the project to see what was actually built, then write the completion report.`,
+      },
+    ];
 
-## Plan Goal
-${plan.goal}
+    const toolDefs = this.tools.getDefinitions().filter((t) =>
+      ["read_file", "list_files", "run_command"].includes(t.name)
+    );
 
-## Subtasks Completed
-${completedSubtasks.map((s) => `- ${s.id}: ${s.title} — ${s.description}`).join("\n") || "(none)"}
+    const MAX_REPORT_ROUNDS = 8;
+    let rounds = 0;
+    let hasUsedTool = false;
 
-${failedSubtasks.length > 0 ? `## Subtasks Skipped/Failed\n${failedSubtasks.map((s) => `- ${s.id}: ${s.title}`).join("\n")}` : ""}
+    while (rounds < MAX_REPORT_ROUNDS) {
+      rounds++;
 
-## Agent Output (truncated)
-${allOutput.slice(0, 6000)}
-
----
-
-Generate a completion report with these sections (use markdown):
-
-### What Was Accomplished
-Summarize what was built/changed in 2-4 bullet points. Be specific about features, files, and functionality.
-
-### Files Created / Modified
-List the key files that were created or modified, grouped by purpose (e.g., "New files", "Modified files"). If unsure from the output, note that.
-
-### How to Use It
-Explain how a user can use or interact with what was built. Include:
-- Any commands to run
-- Configuration needed
-- Entry points or main interfaces
-
-### What's Left (if anything)
-Note any subtasks that were skipped or any follow-up work that might be needed.
-
-Keep the report practical and to the point. No fluff.`;
-
-    try {
-      const response = await this.chat({
+      const response = await withRetry(() => this.chat({
         model: this.model,
-        messages: [{ role: "user", content: prompt }],
-      });
+        messages,
+        tools: toolDefs,
+      }), "report");
+
+      if (response.tool_calls && response.tool_calls.length > 0) {
+        hasUsedTool = true;
+        messages.push({
+          role: "assistant",
+          content: response.content || "",
+          tool_calls: response.tool_calls,
+          thinking: response.thinking,
+        });
+
+        for (const toolCall of response.tool_calls) {
+          const argsStr = Object.entries(toolCall.arguments)
+            .map(([k, v]) => `${k}: "${String(v).slice(0, 60)}${String(v).length > 60 ? "..." : ""}"`)
+            .join(", ");
+
+          const cacheKey = `report:${toolCall.name}:${JSON.stringify(toolCall.arguments)}`;
+          let output: string;
+
+          if (this.toolCache.has(cacheKey)) {
+            output = this.toolCache.get(cacheKey)!;
+            console.log(chalk.magenta(`[architect] ⚙ ${toolCall.name}(${argsStr}) ${chalk.gray("[cached]")}`));
+          } else {
+            console.log(chalk.magenta(`[architect] ⚙ ${toolCall.name}(${argsStr})`));
+            try {
+              output = await this.tools.execute(toolCall.name, toolCall.arguments);
+            } catch (err: unknown) {
+              output = `Error: ${err instanceof Error ? err.message : String(err)}`;
+            }
+            this.toolCache.set(cacheKey, output);
+          }
+
+          messages.push({
+            role: "user",
+            content: `Tool "${toolCall.name}" result:\n${output}`,
+          });
+        }
+        continue;
+      }
+
+      // No tool calls — nudge once to investigate first
+      if (!hasUsedTool) {
+        messages.push({
+          role: "user",
+          content: `Please investigate the project first using list_files and read_file before writing the report.`,
+        });
+        continue;
+      }
+
+      // Report is ready
       return response.content || "(report generation failed — no response)";
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      return `(report generation failed: ${msg})`;
     }
+
+    // Hit round limit — fall back to last assistant message
+    const last = [...messages].reverse().find((m) => m.role === "assistant");
+    return last?.content || "(report generation failed — hit round limit)";
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -506,8 +599,9 @@ Keep the report practical and to the point. No fluff.`;
     const toolDefs = this.tools.getDefinitions();
     let rounds = 0;
     let hasUsedTool = false;
+    let nudgeCount = 0;
 
-    while (rounds < MAX_TOOL_ROUNDS) {
+    while (rounds < MAX_INVESTIGATE_ROUNDS) {
       rounds++;
 
       // Inject a progress summary so the model cannot miss what it already did
@@ -565,6 +659,11 @@ Keep the report practical and to the point. No fluff.`;
 
       // No tool calls — if we haven't used any tools yet, force investigation
       if (!hasUsedTool) {
+        nudgeCount++;
+        if (nudgeCount > MAX_NO_TOOL_NUDGES) {
+          console.log(chalk.yellow(`[architect] ⚠ Model not calling tools after ${nudgeCount} nudges — proceeding with minimal investigation`));
+          return response.content || "(investigation skipped — model did not use tools)";
+        }
         messages.push({
           role: "user",
           content: `Before you can report, you MUST use tools to investigate the codebase. Please use list_files on the project root and read any relevant configuration or source files. Do not produce a report without first exploring the project.`,
@@ -579,7 +678,7 @@ Keep the report practical and to the point. No fluff.`;
     }
 
     // Hit round limit — return what we have
-    console.log(chalk.yellow(`[architect] ⚠ Hit max tool rounds (${MAX_TOOL_ROUNDS}), proceeding with partial investigation`));
+    console.log(chalk.yellow(`[architect] ⚠ Hit max investigation rounds (${MAX_INVESTIGATE_ROUNDS}), proceeding with partial investigation`));
     const last = messages[messages.length - 1];
     return last?.content || "(investigation incomplete)";
   }
@@ -618,41 +717,19 @@ Keep the report practical and to the point. No fluff.`;
       return { ...st, id };
     });
 
-    // Check for missing dependencies
-    const validIds = new Set(normalized.map((s) => s.id));
-    for (const st of normalized) {
-      for (const dep of st.dependencies) {
-        if (!validIds.has(dep)) {
-          console.log(chalk.yellow(`[architect] ⚠ Subtask ${st.id} depends on unknown ${dep} — removing dependency`));
-          st.dependencies = st.dependencies.filter((d) => d !== dep);
-        }
-      }
-    }
-
-    // Check for cycles
-    const hasCycle = this.detectCycle(normalized);
-    if (hasCycle) {
-      console.log(chalk.yellow("[architect] ⚠ Circular dependencies detected — flattening to sequential"));
-      // Break cycles by removing all dependencies (sequential fallback)
-      for (const st of normalized) {
-        st.dependencies = [];
-      }
-    }
-
     plan.subtasks = normalized;
     return plan;
   }
 
   private auditPlan(plan: TaskPlan): string[] {
     const issues: string[] = [];
-    const allIds = new Set(plan.subtasks.map((s) => s.id));
 
     // Single subtask for complex goals
     if (plan.subtasks.length === 1) {
       const desc = plan.subtasks[0].description;
       const wordCount = desc.split(/\s+/).length;
       if (wordCount > 30 || (plan.subtasks[0].filesExpected && plan.subtasks[0].filesExpected.length > 2)) {
-        issues.push("The task appears complex but was broken into only 1 subtask. Break it into smaller, parallelizable pieces.");
+        issues.push("The task appears complex but was broken into only 1 subtask. Break it into smaller, sequential pieces.");
       }
     }
 
@@ -670,15 +747,6 @@ Keep the report practical and to the point. No fluff.`;
     const missingVerif = plan.subtasks.filter((s) => !s.verification).length;
     if (missingVerif === plan.subtasks.length) {
       issues.push("No subtasks have verification commands. Add specific test/build/run commands to prove correctness.");
-    }
-
-    // Dependency issues
-    for (const st of plan.subtasks) {
-      for (const dep of st.dependencies) {
-        if (!allIds.has(dep)) {
-          issues.push(`Subtask ${st.id} references unknown dependency ${dep}.`);
-        }
-      }
     }
 
     return issues;
@@ -772,33 +840,6 @@ Keep the report practical and to the point. No fluff.`;
       rationale: validated.rationale,
       subtasks,
     };
-  }
-
-  private detectCycle(subtasks: Subtask[]): boolean {
-    const adj = new Map<string, string[]>();
-    for (const st of subtasks) {
-      adj.set(st.id, st.dependencies);
-    }
-
-    const visiting = new Set<string>();
-    const visited = new Set<string>();
-
-    const dfs = (id: string): boolean => {
-      if (visiting.has(id)) return true;
-      if (visited.has(id)) return false;
-      visiting.add(id);
-      for (const dep of adj.get(id) || []) {
-        if (dfs(dep)) return true;
-      }
-      visiting.delete(id);
-      visited.add(id);
-      return false;
-    };
-
-    for (const st of subtasks) {
-      if (dfs(st.id)) return true;
-    }
-    return false;
   }
 
   /**

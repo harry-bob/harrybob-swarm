@@ -4,7 +4,7 @@ export const SubtaskSchema = z.object({
   id: z.string().min(1, "Subtask id must not be empty"),
   title: z.string().min(1, "Subtask title must not be empty"),
   description: z.string().min(1, "Subtask description must not be empty"),
-  dependencies: z.array(z.string()),
+  dependencies: z.array(z.string()).optional().default([]),
   verification: z.string().optional(),
   filesExpected: z.array(z.string()).optional(),
   estimatedComplexity: z.enum(["low", "medium", "high"]).optional(),

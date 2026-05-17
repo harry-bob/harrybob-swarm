@@ -49,12 +49,23 @@ export function createReadFileTool(sandbox: Sandbox, cache?: FileCache): Tool {
       }
 
       try {
-        const content = await readFile(filePath, "utf-8");
-        // Store in cache
-        if (cache) {
-          cache.set(relPath, content);
+        let lastErr = "";
+        for (let attempt = 1; attempt <= 3; attempt++) {
+          try {
+            const content = await readFile(filePath, "utf-8");
+            if (cache) cache.set(relPath, content);
+            return content;
+          } catch (err: unknown) {
+            lastErr = err instanceof Error ? err.message : String(err);
+            const isTransient = lastErr.includes("ENOENT") || lastErr.includes("EAGAIN") || lastErr.includes("EBUSY");
+            if (isTransient && attempt < 3) {
+              await new Promise((r) => setTimeout(r, 150 * attempt));
+              continue;
+            }
+            break;
+          }
         }
-        return content;
+        return `Error reading file: ${lastErr}`;
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         return `Error reading file: ${message}`;

@@ -5,7 +5,7 @@ import chalk from "chalk";
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 10_000;
-const MAX_AGENT_ROUNDS = 100; // safety guard against infinite tool loops
+const MAX_AGENT_ROUNDS = 15; // safety guard against infinite tool loops
 
 async function withRetry<T>(fn: () => Promise<T>, label: string, roleTag: string): Promise<T> {
   let lastErr: unknown;
@@ -329,10 +329,13 @@ export class LLMAgent extends BaseAgent {
             output = `Error: ${msg}`;
           }
 
-          // Track file-modifying tool usage
+          // Track file-modifying tool usage and invalidate the read cache so
+          // subsequent read_file calls see the newly written content, not the
+          // stale version that was cached before the write.
           if (this.MODIFYING_TOOLS.has(toolCall.name)) {
             const filePath = (toolCall.arguments.path as string) || "";
             if (filePath) this.modifiedFiles.add(filePath);
+            this.toolCache.clear();
           }
 
           // Cache read-only results

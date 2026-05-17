@@ -45,7 +45,7 @@ export function fixCommand(program: Command): void {
       try {
         const result = await orchestrator.run(fullTask, {
           verbose: options.verbose,
-
+          enableRunCommands: true,
         });
 
         console.log("\n" + "=".repeat(60));

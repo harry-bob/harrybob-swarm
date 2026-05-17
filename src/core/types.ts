@@ -2,7 +2,7 @@ export interface Subtask {
   id: string;
   title: string;
   description: string;
-  dependencies: string[];  // ids of subtasks that must complete first
+  dependencies?: string[];  // kept for backward-compat; ignored by executor (runs linearly)
   verification?: string;   // optional shell command to verify subtask completion
   filesExpected?: string[];  // files this subtask is expected to create or modify
   estimatedComplexity?: "low" | "medium" | "high";
