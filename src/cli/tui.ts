@@ -294,7 +294,9 @@ export class TUI {
       this.renderTimer = null;
     }
 
-    this.savedMode = this.inputMode;
+    // If readInput() is waiting (pending question), restore to "input" so
+    // the TUI can accept typed answers for the *next* question too.
+    this.savedMode = this.inputResolve ? "input" : this.inputMode;
     this.inputMode = "external";
     this.stopStdin();
     this.suspended = true;

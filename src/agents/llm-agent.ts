@@ -5,7 +5,7 @@ import chalk from "chalk";
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 10_000;
-const MAX_AGENT_ROUNDS = 15; // safety guard against infinite tool loops
+const MAX_AGENT_ROUNDS = 100; // safety guard against infinite tool loops
 
 async function withRetry<T>(fn: () => Promise<T>, label: string, roleTag: string): Promise<T> {
   let lastErr: unknown;
@@ -188,6 +188,8 @@ export class LLMAgent extends BaseAgent {
     let finalContent = "";
     let round = 0;
 
+    let content = "";
+
     while (true) {
       round++;
       if (round > MAX_AGENT_ROUNDS) {
@@ -200,24 +202,27 @@ export class LLMAgent extends BaseAgent {
       this.compactHistory();
 
       // ── Stream the LLM response ──────────────────────────────
-      let content = "";
+      content = "";
       let thinking = "";
       let toolCalls: { id: string; name: string; arguments: Record<string, unknown> }[] | undefined;
-      let evalCount = 0;
-      let reasoningCount = 0;
+      let promptTokens = 0;
+      let completionTokens = 0;
+      let reasoningTokens = 0;
       let thinkingActive = false;
       let contentActive = false;
-      let tokenCount = 0;
+      let streamedChunks = 0;
       const streamStart = Date.now();
 
       await withRetry(async () => {
         content = "";
         thinking = "";
         toolCalls = undefined;
-        evalCount = 0;
+        promptTokens = 0;
+        completionTokens = 0;
+        reasoningTokens = 0;
         thinkingActive = false;
         contentActive = false;
-        tokenCount = 0;
+        streamedChunks = 0;
 
         const stream = this.provider.chatStream({
           model: this.model,
@@ -231,7 +236,7 @@ export class LLMAgent extends BaseAgent {
           }
 
           if (chunk.thinking) {
-            tokenCount++;
+            streamedChunks++;
             if (!thinkingActive) {
               thinkingActive = true;
               contentActive = false;
@@ -242,7 +247,7 @@ export class LLMAgent extends BaseAgent {
           }
 
           if (chunk.content) {
-            tokenCount++;
+            streamedChunks++;
             if (thinkingActive) {
               thinkingActive = false;
               contentActive = true;
@@ -257,8 +262,10 @@ export class LLMAgent extends BaseAgent {
 
           if (chunk.done) {
             if (thinkingActive) thinkingActive = false;
-            if (chunk.tokenCount) evalCount = chunk.tokenCount;
-            if (chunk.reasoningTokens) reasoningCount = chunk.reasoningTokens;
+            // Use API-reported token counts (authoritative), not chunk counts
+            if (chunk.promptTokens) promptTokens = chunk.promptTokens;
+            if (chunk.tokenCount) completionTokens = chunk.tokenCount;
+            if (chunk.reasoningTokens) reasoningTokens = chunk.reasoningTokens;
           }
         }
       }, "LLM stream", roleTag);
@@ -268,29 +275,33 @@ export class LLMAgent extends BaseAgent {
       }
 
       const streamDuration = Date.now() - streamStart;
-      if (tokenCount > 0 && streamDuration > 0) {
-        const tps = tokenCount / (streamDuration / 1000);
+      if (streamedChunks > 0 && streamDuration > 0) {
+        const totalOutput = completionTokens || streamedChunks;
+        const tps = totalOutput / (streamDuration / 1000);
         process.stdout.write(
-          chalk.gray(`  ${roleTag} ${tokenCount} tokens · ${tps.toFixed(1)} tok/s\n`)
+          chalk.gray(`  ${roleTag} ${promptTokens} in / ${completionTokens} out / ${reasoningTokens} reasoning · ${tps.toFixed(1)} tok/s\n`)
         );
       }
 
-      totalCompletion += evalCount || tokenCount;
-      totalReasoning += reasoningCount;
+      totalPrompt += promptTokens;
+      totalCompletion += completionTokens;
+      totalReasoning += reasoningTokens;
 
       // ── No tool calls → done ─────────────────────────────────
       if (!toolCalls || toolCalls.length === 0) {
         finalContent = content;
-        // Store assistant response in history
-        this.history.push({ role: "assistant", content });
+        // Store assistant response in history (preserve thinking for multi-turn context)
+        this.history.push({ role: "assistant", content, thinking: thinking || undefined });
         break;
       }
 
       // Add assistant message with tool calls to history
+      // Preserve thinking/reasoning_content for MiMo-style APIs that require it in multi-turn tool conversations
       this.history.push({
         role: "assistant",
         content,
         tool_calls: toolCalls,
+        thinking: thinking || undefined,
       });
 
       // ── Execute ALL tool calls in parallel ───────────────────

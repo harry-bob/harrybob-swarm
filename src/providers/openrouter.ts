@@ -172,6 +172,7 @@ export class OpenRouterProvider implements LLMProvider {
         { id?: string; name?: string; arguments: string }
       >();
       let finalTokenCount = 0;
+      let finalPromptCount = 0;
       let finalReasoningCount = 0;
 
       while (true) {
@@ -207,6 +208,9 @@ export class OpenRouterProvider implements LLMProvider {
               }
             }
 
+            if (json.usage?.prompt_tokens) {
+              finalPromptCount = json.usage.prompt_tokens;
+            }
             if (json.usage?.completion_tokens) {
               finalTokenCount = json.usage.completion_tokens;
             }
@@ -239,6 +243,7 @@ export class OpenRouterProvider implements LLMProvider {
         tool_calls:
           assembledToolCalls.length > 0 ? assembledToolCalls : undefined,
         tokenCount: finalTokenCount || undefined,
+        promptTokens: finalPromptCount || undefined,
         reasoningTokens: finalReasoningCount || undefined,
       };
     } finally {

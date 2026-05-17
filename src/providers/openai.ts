@@ -56,6 +56,8 @@ export class OpenAIProvider implements LLMProvider {
       thinking: result.thinking,
       done: true,
       tokenCount: result.usage.completion,
+      promptTokens: result.usage.prompt,
+      reasoningTokens: result.usage.reasoning || undefined,
     };
   }
 

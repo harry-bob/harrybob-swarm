@@ -26,6 +26,10 @@ interface SwarmConfig {
 interface RunOptions {
   agents?: string[];
   verbose?: boolean;
+  /** Resume from a previous session — skip planning, reuse this plan */
+  resumePlan?: TaskPlan;
+  /** IDs of subtasks already completed in a prior run */
+  resumeCompleted?: string[];
 }
 
 export interface RunResult {
@@ -222,28 +226,56 @@ export class Orchestrator {
     console.log();
 
     // ── Phase 1: Planning (Architect) ────────────────────────
-    console.log(chalk.magenta(`${"─".repeat(60)}`));
-    console.log(chalk.magenta.bold("🧠 PHASE 1: PLANNING"));
-    console.log(chalk.magenta(`${"─".repeat(60)}`));
-
     const architectTools = createArchitectTools(this.sandbox, this.provider, this.config.model, this.config);
     const architect = new ArchitectAgent(this.provider, this.config.model, architectTools, this.sandbox.getRoot());
-    const plan = await architect.plan(taskDescription);
+    const resumeCompleted = options.resumeCompleted || [];
 
-    this.printPlan(plan);
+    let plan: TaskPlan;
+    if (options.resumePlan) {
+      // Resume mode — skip planning, reuse existing plan
+      plan = options.resumePlan;
+      console.log(chalk.magenta(`${"─".repeat(60)}`));
+      console.log(chalk.magenta.bold("🧠 PHASE 1: RESUMING PREVIOUS PLAN"));
+      console.log(chalk.magenta(`${"─".repeat(60)}`));
+      this.printPlan(plan);
+      if (resumeCompleted.length > 0) {
+        console.log(chalk.green(`  ✅ Already completed: ${resumeCompleted.join(", ")}`));
+      }
+    } else {
+      console.log(chalk.magenta(`${"─".repeat(60)}`));
+      console.log(chalk.magenta.bold("🧠 PHASE 1: PLANNING"));
+      console.log(chalk.magenta(`${"─".repeat(60)}`));
+      plan = await architect.plan(taskDescription);
+      this.printPlan(plan);
+    }
 
     // ── Phase 2: Pipeline Execution ──────────────────────────
     console.log(chalk.blue(`${"─".repeat(60)}`));
     console.log(chalk.blue.bold("⚡ PHASE 2: EXECUTION"));
     console.log(chalk.blue(`${"─".repeat(60)}`));
 
-    const subtaskResults = await this.executePipeline(taskDescription, plan, architect);
+    const subtaskResults = await this.executePipeline(taskDescription, plan, architect, resumeCompleted);
+
+    // ── Phase 2b: Completion Report ───────────────────────────
+    const allResults = Object.values(subtaskResults).flat();
+    const allOutput = allResults.map((r) => r.output).filter(Boolean).join("\n\n");
+    const completedIds = Object.keys(subtaskResults);
+
+    console.log(chalk.magenta(`\n${"─".repeat(60)}`));
+    console.log(chalk.magenta.bold("📝 COMPLETION REPORT"));
+    console.log(chalk.magenta(`${"─".repeat(60)}`));
+
+    const report = await architect.generateReport(taskDescription, plan, completedIds, allOutput);
+    console.log();
+    for (const line of report.split("\n")) {
+      console.log(chalk.white(`  ${line}`));
+    }
+    console.log();
 
     // ── Phase 3: Summary ──────────────────────────────────────
     const duration = Date.now() - startTime;
-    const allResults = Object.values(subtaskResults).flat();
 
-    const totalTokens = allResults.reduce(
+    const subtaskTokens = allResults.reduce(
       (acc, r) => ({
         prompt: acc.prompt + r.tokenUsage.prompt,
         completion: acc.completion + r.tokenUsage.completion,
@@ -252,7 +284,14 @@ export class Orchestrator {
       { prompt: 0, completion: 0, reasoning: 0 }
     );
 
-    const completedIds = Object.keys(subtaskResults);
+    // Include architect's token usage (planning + replanning + report calls)
+    const archTokens = architect.getTokenUsage();
+    const totalTokens = {
+      prompt: subtaskTokens.prompt + archTokens.prompt,
+      completion: subtaskTokens.completion + archTokens.completion,
+      reasoning: subtaskTokens.reasoning + archTokens.reasoning,
+    };
+
     const failedIds = plan.subtasks.filter((s) => !completedIds.includes(s.id));
 
     this.printSummary(plan, completedIds, failedIds, duration, totalTokens);
@@ -269,6 +308,8 @@ export class Orchestrator {
       lastPlan: plan.goal,
       filesCreated: [...new Set(filesCreated)],
       timestamp: Date.now(),
+      plan,
+      completed: completedIds,
     }).catch(() => {});
 
     const output = Object.entries(subtaskResults)
@@ -301,10 +342,11 @@ export class Orchestrator {
   private async executePipeline(
     taskDescription: string,
     plan: TaskPlan,
-    architect: ArchitectAgent
+    architect: ArchitectAgent,
+    initialCompleted: string[] = []
   ): Promise<Record<string, AgentResult[]>> {
     const results: Record<string, AgentResult[]> = {};
-    const completed = new Set<string>();
+    const completed = new Set<string>(initialCompleted);
     const failed = new Set<string>();
     const reviewRounds = new Map<string, number>();
 

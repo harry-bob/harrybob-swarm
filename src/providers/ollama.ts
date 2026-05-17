@@ -188,6 +188,7 @@ export class OllamaProvider implements LLMProvider {
               tool_calls: toolCalls,
               done: json.done || false,
               tokenCount: json.eval_count || undefined,
+              promptTokens: json.prompt_eval_count || undefined,
               reasoningTokens: 0,
               durationNs: json.eval_duration || undefined,
             };
@@ -220,6 +221,7 @@ export class OllamaProvider implements LLMProvider {
             tool_calls: toolCalls,
             done: json.done || false,
             tokenCount: json.eval_count || undefined,
+            promptTokens: json.prompt_eval_count || undefined,
             reasoningTokens: 0,
             durationNs: json.eval_duration || undefined,
           };

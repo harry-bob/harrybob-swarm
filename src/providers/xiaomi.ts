@@ -38,9 +38,16 @@ export class XiaomiProvider implements LLMProvider {
   }
 
   private buildBody(options: ChatOptions): Record<string, unknown> {
-    const body: Record<string, unknown> = {
-      model: options.model,
-      messages: options.messages.map((m) => {
+    // Merge consecutive system messages into one (many APIs only support a single system message)
+    const mergedMessages: Array<{ role: string; content: string }> = [];
+    for (const m of options.messages) {
+      if (
+        m.role === "system" &&
+        mergedMessages.length > 0 &&
+        mergedMessages[mergedMessages.length - 1].role === "system"
+      ) {
+        mergedMessages[mergedMessages.length - 1].content += "\n\n" + m.content;
+      } else {
         const msg: Record<string, unknown> = {
           role: m.role,
           content: m.content,
@@ -61,16 +68,34 @@ export class XiaomiProvider implements LLMProvider {
         if (m.tool_call_id) {
           msg.tool_call_id = m.tool_call_id;
         }
-        return msg;
-      }),
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens ?? 4096,
+        // MiMo requires reasoning_content to be preserved in assistant messages with tool_calls
+        if (m.thinking) {
+          msg.reasoning_content = m.thinking;
+        }
+        mergedMessages.push(msg as { role: string; content: string });
+      }
+    }
+
+    const body: Record<string, unknown> = {
+      model: options.model,
+      messages: mergedMessages,
     };
 
+    // Only set temperature/max_completion_tokens if explicitly provided (minimize unsupported params)
+    if (options.temperature != null) {
+      body.temperature = options.temperature;
+    }
+    if (options.maxTokens != null) {
+      body.max_completion_tokens = options.maxTokens;
+    }
+
     if (options.tools && options.tools.length > 0) {
-      body.tools = options.tools.map((t) => ({
-        type: "function",
-        function: {
+      body.tools = options.tools.map((t) => {
+        const required = Object.entries(t.parameters)
+          .filter(([, param]) => param.required !== false)
+          .map(([key]) => key);
+
+        const funcDef: Record<string, unknown> = {
           name: t.name,
           description: t.description,
           parameters: {
@@ -81,30 +106,43 @@ export class XiaomiProvider implements LLMProvider {
                 { type: param.type, description: param.description },
               ])
             ),
-            required: Object.entries(t.parameters)
-              .filter(([, param]) => param.required !== false)
-              .map(([key]) => key),
           },
-        },
-      }));
+        };
+
+        // Only include required if non-empty (some APIs reject empty arrays)
+        if (required.length > 0) {
+          (funcDef.parameters as Record<string, unknown>).required = required;
+        }
+
+        return { type: "function", function: funcDef };
+      });
+      // Note: tool_choice not sent — Xiaomi API may not support it
     }
 
-    if (options.responseFormat?.type === "json_object") {
-      body.response_format = { type: "json_object" };
-    }
+    // Skip response_format — many providers don't support it
+    // if (options.responseFormat?.type === "json_object") {
+    //   body.response_format = { type: "json_object" };
+    // }
 
     return body;
   }
 
   async chat(options: ChatOptions): Promise<ChatResponse> {
+    const requestBody = this.buildBody(options);
+    const bodyStr = JSON.stringify(requestBody);
+
     const response = await fetch(`${this.baseURL}/chat/completions`, {
       method: "POST",
       headers: this.buildHeaders(),
-      body: JSON.stringify(this.buildBody(options)),
+      body: bodyStr,
     });
 
     if (!response.ok) {
       const error = await response.text();
+      if (response.status === 400) {
+        console.error(`\n[xiaomi] 400 error. Full error response:\n${error}\n`);
+        console.error(`[xiaomi] Request body:\n${bodyStr}\n`);
+      }
       throw new Error(`Xiaomi API error: ${response.status} - ${error}`);
     }
 
@@ -138,7 +176,7 @@ export class XiaomiProvider implements LLMProvider {
 
     return {
       content: choice?.message?.content || "",
-      thinking: choice?.message?.reasoning || undefined,
+      thinking: choice?.message?.reasoning_content || choice?.message?.reasoning || undefined,
       tool_calls: toolCalls,
       usage: {
         prompt: data.usage?.prompt_tokens || 0,
@@ -165,6 +203,11 @@ export class XiaomiProvider implements LLMProvider {
 
       if (!response.ok) {
         const error = await response.text();
+        if (response.status === 400) {
+          const bodyStr = JSON.stringify(body, null, 2);
+          console.error(`\n[xiaomi] 400 error (stream). Full error response:\n${error}\n`);
+          console.error(`[xiaomi] Request body:\n${bodyStr}\n`);
+        }
         throw new Error(`Xiaomi API error: ${response.status} - ${error}`);
       }
 
@@ -178,6 +221,7 @@ export class XiaomiProvider implements LLMProvider {
         { id?: string; name?: string; arguments: string }
       >();
       let finalTokenCount = 0;
+      let finalPromptCount = 0;
       let finalReasoningCount = 0;
 
       while (true) {
@@ -212,6 +256,9 @@ export class XiaomiProvider implements LLMProvider {
               }
             }
 
+            if (json.usage?.prompt_tokens) {
+              finalPromptCount = json.usage.prompt_tokens;
+            }
             if (json.usage?.completion_tokens) {
               finalTokenCount = json.usage.completion_tokens;
             }
@@ -221,7 +268,7 @@ export class XiaomiProvider implements LLMProvider {
 
             yield {
               content: delta.content || undefined,
-              thinking: delta.reasoning || undefined,
+              thinking: delta.reasoning_content || delta.reasoning || undefined,
               done: false,
             };
           } catch {
@@ -243,6 +290,7 @@ export class XiaomiProvider implements LLMProvider {
         tool_calls:
           assembledToolCalls.length > 0 ? assembledToolCalls : undefined,
         tokenCount: finalTokenCount || undefined,
+        promptTokens: finalPromptCount || undefined,
         reasoningTokens: finalReasoningCount || undefined,
       };
     } finally {

@@ -6,6 +6,7 @@ export interface ChatMessage {
   content: string;
   tool_calls?: ToolCall[];
   tool_call_id?: string;
+  thinking?: string; // reasoning_content for MiMo-style APIs
 }
 
 export interface ChatOptions {

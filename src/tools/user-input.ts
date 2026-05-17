@@ -15,14 +15,12 @@ function askUser(promptText: string): Promise<string> {
 
     rl.on("SIGINT", () => {
       rl.close();
-      process.stdin.pause();
       resolve("");
     });
 
     process.stderr.write(chalk.green(`\n💬 Architect asks: ${promptText}\n`));
     rl.question(chalk.gray("Your answer: "), (answer) => {
       rl.close();
-      process.stdin.pause();
       resolve(answer.trim());
     });
   });

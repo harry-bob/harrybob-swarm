@@ -1,4 +1,7 @@
 import * as readline from "node:readline";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
+import { homedir } from "node:os";
 import chalk from "chalk";
 import { OllamaProvider } from "../providers/ollama.js";
 import { OpenAIProvider } from "../providers/openai.js";
@@ -67,7 +70,16 @@ export async function promptModelSelection(currentModel: string, baseURL?: strin
 async function fetchAllModels(config: SwarmConfig): Promise<ModelInfo[]> {
   const results: ModelInfo[] = [];
 
-  // Helper: get credentials for a provider without cross-contaminating providers
+  // Load global credentials from ~/.swarm/config.json
+  let globalCreds: Record<string, { apiKey?: string; baseURL?: string }> = {};
+  try {
+    const raw = await readFile(join(homedir(), ".swarm", "config.json"), "utf-8");
+    const parsed = JSON.parse(raw);
+    globalCreds = parsed.credentials || {};
+  } catch { /* no global config */ }
+
+  // Helper: get credentials for a provider
+  // Priority: env vars > config (current provider) > global ~/.swarm/config.json > defaults
   function getCreds(
     providerName: string,
     envKeyName: string,
@@ -75,12 +87,18 @@ async function fetchAllModels(config: SwarmConfig): Promise<ModelInfo[]> {
     defaultUrl: string
   ): { key: string; url: string } {
     const isCurrent = config.provider === providerName;
-    const key = isCurrent
-      ? (config.apiKey || process.env[envKeyName] || "")
-      : (process.env[envKeyName] || config.apiKey || ""); // fallback to config.apiKey if env not set
-    const url = isCurrent
-      ? (config.baseURL || (envUrlName ? process.env[envUrlName] : "") || defaultUrl)
-      : ((envUrlName ? process.env[envUrlName] : "") || defaultUrl);
+    const gc = globalCreds[providerName] || {};
+
+    const key = process.env[envKeyName]
+      || (isCurrent ? config.apiKey : "")
+      || gc.apiKey
+      || "";
+
+    const url = (envUrlName ? process.env[envUrlName] : "")
+      || (isCurrent ? config.baseURL : "")
+      || gc.baseURL
+      || defaultUrl;
+
     return { key, url };
   }
 

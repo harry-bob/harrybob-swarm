@@ -6,7 +6,7 @@ import chalk from "chalk";
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 10_000;
-const MAX_TOOL_ROUNDS = 12;
+const MAX_TOOL_ROUNDS = 100;
 
 async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
   let lastErr: unknown;
@@ -188,12 +188,25 @@ export class ArchitectAgent {
   private projectDir: string;
   private toolCache = new Map<string, string>();
   private readonly CACHEABLE_TOOLS = new Set(["read_file", "list_files", "web_search"]);
+  private totalTokens = { prompt: 0, completion: 0, reasoning: 0 };
 
   constructor(provider: LLMProvider, model: string, tools: ToolRegistry, projectDir?: string) {
     this.provider = provider;
     this.model = model;
     this.tools = tools;
     this.projectDir = projectDir || process.cwd();
+  }
+
+  getTokenUsage(): { prompt: number; completion: number; reasoning: number } {
+    return { ...this.totalTokens };
+  }
+
+  private async chat(...args: Parameters<LLMProvider['chat']>): Promise<import('../providers/types.js').ChatResponse> {
+    const response = await this.provider.chat(...args);
+    this.totalTokens.prompt += response.usage?.prompt || 0;
+    this.totalTokens.completion += response.usage?.completion || 0;
+    this.totalTokens.reasoning += response.usage?.reasoning || 0;
+    return response;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -280,7 +293,7 @@ export class ArchitectAgent {
 
       const response = await withRetry(
         () =>
-          this.provider.chat({
+          this.chat({
             model: this.model,
             messages,
             tools: toolDefs,
@@ -294,6 +307,7 @@ export class ArchitectAgent {
           role: "assistant",
           content: response.content || "",
           tool_calls: response.tool_calls,
+          thinking: response.thinking,
         });
 
         for (const toolCall of response.tool_calls) {
@@ -415,6 +429,68 @@ export class ArchitectAgent {
   }
 
   // ═══════════════════════════════════════════════════════════
+  //  Completion Report
+  // ═══════════════════════════════════════════════════════════
+
+  async generateReport(
+    taskDescription: string,
+    plan: TaskPlan,
+    completedIds: string[],
+    allOutput: string,
+  ): Promise<string> {
+    const completedSubtasks = plan.subtasks.filter((s) => completedIds.includes(s.id));
+    const failedSubtasks = plan.subtasks.filter((s) => !completedIds.includes(s.id));
+
+    const prompt = `You are an expert software architect. Generate a clear, concise completion report for the task that was just finished.
+
+## Original Task
+${taskDescription}
+
+## Plan Goal
+${plan.goal}
+
+## Subtasks Completed
+${completedSubtasks.map((s) => `- ${s.id}: ${s.title} — ${s.description}`).join("\n") || "(none)"}
+
+${failedSubtasks.length > 0 ? `## Subtasks Skipped/Failed\n${failedSubtasks.map((s) => `- ${s.id}: ${s.title}`).join("\n")}` : ""}
+
+## Agent Output (truncated)
+${allOutput.slice(0, 6000)}
+
+---
+
+Generate a completion report with these sections (use markdown):
+
+### What Was Accomplished
+Summarize what was built/changed in 2-4 bullet points. Be specific about features, files, and functionality.
+
+### Files Created / Modified
+List the key files that were created or modified, grouped by purpose (e.g., "New files", "Modified files"). If unsure from the output, note that.
+
+### How to Use It
+Explain how a user can use or interact with what was built. Include:
+- Any commands to run
+- Configuration needed
+- Entry points or main interfaces
+
+### What's Left (if anything)
+Note any subtasks that were skipped or any follow-up work that might be needed.
+
+Keep the report practical and to the point. No fluff.`;
+
+    try {
+      const response = await this.chat({
+        model: this.model,
+        messages: [{ role: "user", content: prompt }],
+      });
+      return response.content || "(report generation failed — no response)";
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return `(report generation failed: ${msg})`;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
   //  Phase 1: Investigation
   // ═══════════════════════════════════════════════════════════
 
@@ -453,6 +529,7 @@ export class ArchitectAgent {
           role: "assistant",
           content: response.content || "",
           tool_calls: response.tool_calls,
+          thinking: response.thinking,
         });
 
         for (const toolCall of response.tool_calls) {
@@ -635,7 +712,7 @@ export class ArchitectAgent {
       attempts++;
       const response = await withRetry(
         () =>
-          this.provider.chat({
+          this.chat({
             model: this.model,
             messages,
             responseFormat: { type: "json_object" },
