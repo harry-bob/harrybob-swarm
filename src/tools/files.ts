@@ -27,6 +27,15 @@ export class FileCache {
   }
 }
 
+// Files that are internal to swarm and should not be read by agents
+const INTERNAL_FILES = new Set([
+  ".swarmrc.json",
+  ".swarm-session.json",
+  ".env",
+  ".env.example",
+  ".gitignore",
+]);
+
 export function createReadFileTool(sandbox: Sandbox, cache?: FileCache): Tool {
   return {
     definition: {
@@ -37,8 +46,15 @@ export function createReadFileTool(sandbox: Sandbox, cache?: FileCache): Tool {
       },
     },
     async execute(args) {
-      const filePath = sandbox.validate(args.path as string);
       const relPath = sandbox.relative(args.path as string);
+      const baseName = relPath.split("/").pop() || relPath;
+
+      // Block internal swarm files — agents have no reason to read these
+      if (INTERNAL_FILES.has(baseName) || INTERNAL_FILES.has(relPath)) {
+        return "(internal swarm config — not relevant to this task)";
+      }
+
+      const filePath = sandbox.validate(args.path as string);
 
       // Check cache first
       if (cache) {
@@ -152,7 +168,10 @@ export function createListFilesTool(sandbox: Sandbox): Tool {
         const entries = await readdir(dirPath, { withFileTypes: true });
         const filtered = entries.filter((e) => {
           const name = e.name;
-          return !name.startsWith(".") || name === ".swarmrc.json";
+          // Hide all dotfiles and internal swarm files from agents
+          if (name.startsWith(".")) return false;
+          if (name === ".swarmrc.json" || name === ".swarm-session.json") return false;
+          return true;
         });
         const lines = filtered.map((e) => {
           const isDir = e.isDirectory();

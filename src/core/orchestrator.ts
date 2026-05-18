@@ -7,6 +7,8 @@ import { Sandbox, ToolRegistry, FileCache, createReadFileTool, createWriteFileTo
 import { saveSession } from "./session.js";
 import { getPackageVersion } from "../utils/version.js";
 import { RunController } from "./run-controller.js";
+import { readdir, rename, mkdir } from "node:fs/promises";
+import { join, basename } from "node:path";
 import chalk from "chalk";
 
 interface SwarmConfig {
@@ -15,6 +17,7 @@ interface SwarmConfig {
   model: string;
   baseURL?: string;
   apiKey?: string;
+  numCtx?: number; // Ollama context window size
   agents: Record<string, { role: string; systemPrompt: string }>;
   orchestration: {
     maxConcurrentAgents: number;
@@ -121,6 +124,15 @@ Before finishing, you MUST run a SELF-REVIEW:
 5. Ensure no TODOs, placeholders, or dead code remain
 
 Only declare the task complete after the self-review passes.
+
+## Test File Hygiene
+- NEVER create test/verification files in the project root. Always put them in a dedicated folder:
+  - For ad-hoc verification scripts: test/verification/
+  - For unit tests: test/ or __tests__/ (match existing project conventions)
+- After verification passes, DELETE any temporary test scripts that are not part of the final deliverable.
+  Example: if you created test/verification/check.js to verify your work, delete it after it passes.
+- The only test files that should remain are ones the user explicitly asked for or that are part of the project's test suite.
+- Before declaring done, run list_files on the project root to confirm no stray test files were left behind.
 `;
 
 const REVIEWER_TOOLS_PROMPT = `
@@ -206,6 +218,7 @@ export class Orchestrator {
       model: config.model,
       baseURL: config.baseURL,
       apiKey: config.apiKey,
+      numCtx: config.numCtx || (process.env.OLLAMA_NUM_CTX ? parseInt(process.env.OLLAMA_NUM_CTX, 10) : undefined),
     });
     this.sandbox = new Sandbox(process.cwd());
   }
@@ -499,6 +512,9 @@ export class Orchestrator {
       });
     }
 
+    // Cleanup stray test files after coder pass
+    await this.cleanupStrayTestFiles();
+
     if (!coder.hasModifiedFiles()) {
       console.log(chalk.red(`  │ ❌ Coder failed to modify files after ${stubbornRetries} retries. Notifying architect to modify plan...`));
 
@@ -614,6 +630,9 @@ export class Orchestrator {
       modifiedFiles = coder.getModifiedFiles();
       coderSummary = fixResult.output;
       reviewRound++;
+
+      // Cleanup stray test files after each coder round
+      await this.cleanupStrayTestFiles();
     }
 
     // ── Architect replan with investigation ────────────────
@@ -678,9 +697,67 @@ export class Orchestrator {
       }
     }
 
+    // ── Cleanup stray test files from project root ──────────
+    await this.cleanupStrayTestFiles();
+
     // Mark done
     results[subtask.id] = allResults;
     completed.add(subtask.id);
+  }
+
+  /**
+   * Scan the project root for test/verification files and move them to test/.
+   * Patterns matched: test*.js, test*.py, test*.html, *_test.*, *_spec.*, verify*.
+   */
+  private async cleanupStrayTestFiles(): Promise<void> {
+    const TEST_PATTERNS = [
+      /^test[_-]?.*\.(js|ts|py|html|sh)$/i,     // test.js, test2.js, test-clock.js
+      /^.+[_-]test\.(js|ts|py|html|sh)$/i,       // app_test.js, my-test.js
+      /^.+[_-]spec\.(js|ts|py|html|sh)$/i,       // app_spec.js
+      /^verify[_-]?.*\.(js|ts|py|html|sh)$/i,    // verify.js, verify-clock.js
+      /^check[_-]?.*\.(js|ts|py|html|sh)$/i,     // check.js
+      /^debug[_-]?.*\.(js|ts|py|html|sh)$/i,     // debug.js
+      /^temp[_-]?.*\.(js|ts|py|html|sh)$/i,      // temp.js
+      /^tmp[_-]?.*\.(js|ts|py|html|sh)$/i,       // tmp.js
+    ];
+
+    const SKIP_DIRS = new Set(["node_modules", ".git", "test", "__tests__", "dist", "build"]);
+
+    try {
+      const root = this.sandbox.getRoot();
+      const entries = await readdir(root, { withFileTypes: true });
+      const strayFiles: string[] = [];
+
+      for (const entry of entries) {
+        if (!entry.isFile()) continue;
+        if (SKIP_DIRS.has(entry.name)) continue;
+        if (entry.name.startsWith(".")) continue; // skip dotfiles
+
+        const isTestFile = TEST_PATTERNS.some((p) => p.test(entry.name));
+        if (isTestFile) {
+          strayFiles.push(entry.name);
+        }
+      }
+
+      if (strayFiles.length === 0) return;
+
+      // Ensure test/ directory exists
+      const testDir = join(root, "test");
+      await mkdir(testDir, { recursive: true });
+
+      for (const file of strayFiles) {
+        const src = join(root, file);
+        const dest = join(testDir, file);
+        try {
+          await rename(src, dest);
+          console.log(chalk.gray(`  │ 🧹 Moved stray test file: ${file} → test/${file}`));
+        } catch {
+          // File may have been deleted already or permission issue — skip
+        }
+      }
+    } catch {
+      // Non-fatal — cleanup is best-effort
+    }
   }
 
   // ── Reviewer helpers ───────────────────────────────────────

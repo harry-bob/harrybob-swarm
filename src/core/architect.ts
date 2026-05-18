@@ -6,7 +6,8 @@ import chalk from "chalk";
 
 const MAX_RETRIES = 5;
 const RETRY_DELAY_MS = 10_000;
-const MAX_INVESTIGATE_ROUNDS = 20;
+const MAX_INVESTIGATE_ROUNDS = 100;
+const MAX_INVESTIGATION_TOOL_CALLS = 12; // hard cap on total tool calls during investigation
 const MAX_REPLAN_ROUNDS = 15;
 const MAX_NO_TOOL_NUDGES = 2; // abort loop if model refuses to call tools
 
@@ -40,7 +41,8 @@ Gather enough context about the project structure, existing code, and relevant t
 - run_command — execute shell commands (e.g., "cat package.json", "git log --oneline -5")
 - web_search — search the web for documentation or best practices
 - research — delegate to a research agent for deep investigation
-- ask_user_question — ask the user for clarification (only if the request is truly ambiguous)
+
+NOTE: ask_user_question is NOT available during investigation. Questions to the user will be asked later during planning if needed.
 
 ## Investigation Protocol (MUST follow)
 1. DISCOVER STRUCTURE: Start with list_files on the project root. Identify the tech stack (package.json, tsconfig.json, Cargo.toml, pyproject.toml, etc.).
@@ -48,7 +50,7 @@ Gather enough context about the project structure, existing code, and relevant t
 3. MAP DEPENDENCIES: Understand which files import from which. Identify the module graph.
 4. GAP ANALYSIS: Determine what already exists vs. what needs to be built. Note existing patterns (error handling, naming conventions, testing style).
 5. EXTERNAL KNOWLEDGE: If the task involves unfamiliar libraries or APIs, use web_search or research to gather context.
-6. CLARIFY: Only use ask_user_question if the task has genuinely ambiguous requirements after investigation. NEVER use it for technical issues like file read errors — use run_command("cat <path>") as a fallback instead.
+6. If the directory is empty or near-empty, that's fine — stop investigating and report that it's a new project.
 
 ## Efficiency Rules
 - Do NOT call the same tool with the same arguments more than once. Previous tool results are in the conversation history. Repeating a tool call wastes tokens and is never necessary.
@@ -121,11 +123,34 @@ You have already investigated the codebase. You will receive:
 Your job is to produce a JSON task plan that breaks the work into independent, parallelizable subtasks.
 
 ## Planning Rules (STRICT)
-1. BREAK IT DOWN: 
-   - Simple tasks (≤1 file, ≤50 lines): 1 subtask is OK.
-   - Medium tasks: 2-4 subtasks.
-   - Complex tasks (new feature, API, refactor): 3-6 subtasks.
-   - NEVER forward the raw user request as a single vague subtask.
+1. TASK SIZING — THIS IS CRITICAL:
+   Each subtask has SIGNIFICANT overhead: planning → coder → 2 parallel reviewers → architect replan. Over-splitting wastes time and produces WORSE results than a single focused agent.
+
+   USE 1 SUBTASK when:
+   - Building a single-page web app (HTML + CSS + JS together)
+   - Creating a small script or utility (<200 lines total)
+   - The files are tightly coupled (changing one requires changing others)
+   - The task is "create X" where X is a self-contained unit
+   - Example: "build a clock webapp", "create a todo app", "write a CLI tool"
+
+   USE 2-3 SUBTASKS when:
+   - There are genuinely independent components (e.g., backend API + separate frontend)
+   - You need a foundation layer (types/config) before the implementation
+   - The task has clear phases (database schema → API routes → UI)
+   - Total code will be >300 lines across multiple independent modules
+
+   USE 4+ SUBTASKS only when:
+   - The task is a large refactor touching many unrelated files
+   - There are multiple independent services or packages
+   - The user explicitly asked for phased implementation
+
+   NEVER split:
+   - HTML, CSS, and JS for the same page into separate subtasks
+   - A function and its tests into separate subtasks
+   - A component and its styling into separate subtasks
+   - Tightly coupled files that must be written together
+
+   NEVER forward the raw user request as a single vague subtask.
 
 2. BE SPECIFIC:
    - Each description must name EXACT files to create/modify.
@@ -596,10 +621,13 @@ export class ArchitectAgent {
       { role: "user", content: `The user wants: "${taskDescription}"\n\nInvestigate the project to understand what exists and what needs to change. Use your tools.` },
     ];
 
-    const toolDefs = this.tools.getDefinitions();
+    // Filter out ask_user_question during investigation — only allow during planning/replanning
+    const toolDefs = this.tools.getDefinitions().filter(t => t.name !== "ask_user_question");
     let rounds = 0;
     let hasUsedTool = false;
     let nudgeCount = 0;
+    let totalToolCalls = 0;
+    let dirIsEmpty: boolean | null = null; // null = unknown, true/false after first list_files
 
     while (rounds < MAX_INVESTIGATE_ROUNDS) {
       rounds++;
@@ -618,6 +646,12 @@ export class ArchitectAgent {
 
       // If the model wants to use tools
       if (response.tool_calls && response.tool_calls.length > 0) {
+        // Enforce total tool call budget
+        if (totalToolCalls >= MAX_INVESTIGATION_TOOL_CALLS) {
+          console.log(chalk.yellow(`[architect] ⚠ Reached tool call budget (${MAX_INVESTIGATION_TOOL_CALLS}) — stopping investigation`));
+          break;
+        }
+
         hasUsedTool = true;
         messages.push({
           role: "assistant",
@@ -627,6 +661,12 @@ export class ArchitectAgent {
         });
 
         for (const toolCall of response.tool_calls) {
+          // Check budget per-call too (model may request multiple in one turn)
+          if (totalToolCalls >= MAX_INVESTIGATION_TOOL_CALLS) {
+            console.log(chalk.yellow(`[architect] ⚠ Reached tool call budget (${MAX_INVESTIGATION_TOOL_CALLS}) — stopping investigation`));
+            break;
+          }
+
           const argsStr = Object.entries(toolCall.arguments)
             .map(([k, v]) => `${k}: "${String(v).slice(0, 60)}${String(v).length > 60 ? '...' : ''}"`)
             .join(", ");
@@ -649,10 +689,32 @@ export class ArchitectAgent {
             }
           }
 
+          totalToolCalls++;
+
+          // Detect empty/near-empty directory after first list_files
+          if (toolCall.name === "list_files" && dirIsEmpty === null) {
+            const entries = output.split("\n").filter(l => l.trim()).length;
+            // .swarmrc.json, .swarm-session.json, and similar config files count as "empty"
+            const meaningfulEntries = output.split("\n").filter(l => {
+              const trimmed = l.trim();
+              return trimmed && !trimmed.startsWith(".");
+            }).length;
+            dirIsEmpty = meaningfulEntries === 0;
+            if (dirIsEmpty) {
+              console.log(chalk.magenta(`[architect] 📂 Empty directory detected — minimal investigation needed`));
+            }
+          }
+
           messages.push({
             role: "user",
             content: `Tool "${toolCall.name}" result:\n${output}`,
           });
+
+          // Early exit: if directory is empty and we've used a few tools, stop investigating
+          if (dirIsEmpty && totalToolCalls >= 3) {
+            console.log(chalk.magenta(`[architect] ✅ Empty project — investigation complete (${totalToolCalls} tool calls)`));
+            return response.content || "(empty project directory — no existing code to investigate)";
+          }
         }
         continue;
       }
@@ -673,7 +735,7 @@ export class ArchitectAgent {
 
       // Investigation complete
       const report = response.content || "(no report generated)";
-      console.log(chalk.magenta(`[architect] ✅ Investigation complete (${rounds} round${rounds > 1 ? "s" : ""})`));
+      console.log(chalk.magenta(`[architect] ✅ Investigation complete (${rounds} round${rounds > 1 ? "s" : ""}, ${totalToolCalls} tool calls)`));
       return report;
     }
 
@@ -724,14 +786,8 @@ export class ArchitectAgent {
   private auditPlan(plan: TaskPlan): string[] {
     const issues: string[] = [];
 
-    // Single subtask for complex goals
-    if (plan.subtasks.length === 1) {
-      const desc = plan.subtasks[0].description;
-      const wordCount = desc.split(/\s+/).length;
-      if (wordCount > 30 || (plan.subtasks[0].filesExpected && plan.subtasks[0].filesExpected.length > 2)) {
-        issues.push("The task appears complex but was broken into only 1 subtask. Break it into smaller, sequential pieces.");
-      }
-    }
+    // Single subtask is fine for most tasks — only flag if description is truly vague
+    // (We no longer force splitting based on file count — tightly coupled files belong together)
 
     // Vague descriptions
     for (const st of plan.subtasks) {

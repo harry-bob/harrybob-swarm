@@ -4,18 +4,21 @@ import { StreamChunk } from "./stream-types.js";
 export interface OllamaProviderOptions {
   baseURL?: string;
   model?: string;
+  numCtx?: number; // context window size
 }
 
 export class OllamaProvider implements LLMProvider {
   name = "ollama";
   private baseURL: string;
   private defaultModel: string;
+  private numCtx: number;
   private readonly CHAT_TIMEOUT_MS = 300_000; // 5 minutes
   private readonly STREAM_IDLE_MS = 60_000;  // 60 seconds without chunks
 
   constructor(options?: OllamaProviderOptions) {
     this.baseURL = options?.baseURL || process.env.OLLAMA_BASE_URL || "http://localhost:11434";
     this.defaultModel = options?.model || process.env.OLLAMA_MODEL || "llama3.1";
+    this.numCtx = options?.numCtx || 131072; // 128K default context window
   }
 
   private buildBody(options: ChatOptions, stream: boolean): Record<string, unknown> {
@@ -41,6 +44,7 @@ export class OllamaProvider implements LLMProvider {
       options: {
         temperature: options.temperature ?? 0.7,
         num_predict: options.maxTokens ?? 8192,
+        num_ctx: this.numCtx,
       },
     };
 

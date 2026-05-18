@@ -8,6 +8,7 @@ export interface ProviderOptions {
   model?: string;
   baseURL?: string;
   apiKey?: string;
+  numCtx?: number;
 }
 
 export function createProvider(providerName: string, options?: ProviderOptions): LLMProvider {
@@ -15,7 +16,7 @@ export function createProvider(providerName: string, options?: ProviderOptions):
     case "openai":
       return new OpenAIProvider(options?.apiKey, options?.baseURL);
     case "ollama":
-      return new OllamaProvider({ baseURL: options?.baseURL, model: options?.model });
+      return new OllamaProvider({ baseURL: options?.baseURL, model: options?.model, numCtx: options?.numCtx });
     case "openrouter":
       return new OpenRouterProvider({ apiKey: options?.apiKey, baseURL: options?.baseURL });
     case "xiaomi":
